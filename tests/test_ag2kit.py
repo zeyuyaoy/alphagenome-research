@@ -39,8 +39,11 @@ def test_unorientable_records_are_excluded(eff, ref, alt, status):
     assert out.estimate is None
 
 
-def test_missing_estimate_is_excluded():
-    assert va.harmonize_effect(np.nan, "C", "T", "C").status == "missing_statistics"
+@pytest.mark.parametrize("estimate", [None, np.nan, np.inf, -np.inf])
+def test_missing_or_nonfinite_estimate_is_excluded(estimate):
+    out = va.harmonize_effect(estimate, "C", "T", "C")
+    assert out.status == "missing_statistics"
+    assert out.estimate is None
 
 
 def test_reference_mismatch_is_detectable_from_cached_bases(tmp_path):
@@ -152,6 +155,26 @@ def test_lead_is_the_most_significant_pair_in_its_cluster():
     )
     out = va.cluster_loci(df)
     assert out[out["is_lead"]]["variant_id"].tolist() == ["strong"]
+
+
+@pytest.mark.parametrize("index", [pd.Index([7, 7, 2]), pd.Index([3, 1, 4], name="sample")])
+def test_cluster_loci_preserves_row_index_and_order(index):
+    df = pd.DataFrame(
+        {
+            "variant_id": ["weak", "strong", "other"],
+            "chrom": ["7", "7", "1"],
+            "pos": [100_000, 200_000, 10_000],
+            "gene": ["G1", "G2", "G3"],
+            "pval": [1e-2, 1e-8, 1e-5],
+        },
+        index=index,
+    )
+
+    out = va.cluster_loci(df)
+
+    pd.testing.assert_frame_equal(out[df.columns], df)
+    assert out["locus_group"].tolist() == ["strong", "strong", "other"]
+    assert out["is_lead"].tolist() == [False, True, True]
 
 
 def test_ld_clusters_requires_its_columns():

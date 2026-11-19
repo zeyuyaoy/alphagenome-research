@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -106,6 +107,9 @@ def harmonize_effect(
     """
     if estimate is None or pd.isna(estimate):
         return Harmonized(None, False, "missing_statistics")
+    estimate = float(estimate)
+    if not math.isfinite(estimate):
+        return Harmonized(None, False, "missing_statistics")
     ref, alt = str(ref).upper(), str(alt).upper()
     effect = str(effect_allele).upper()
     if ref == alt:
@@ -115,9 +119,9 @@ def harmonize_effect(
     if not forward_strand and is_palindromic(ref, alt):
         return Harmonized(None, False, "palindromic")
     if effect == alt:
-        return Harmonized(float(estimate), False, "ok")
+        return Harmonized(estimate, False, "ok")
     if effect == ref:
-        return Harmonized(-float(estimate), True, "ok")
+        return Harmonized(-estimate, True, "ok")
     return Harmonized(None, False, "effect_allele_not_in_ref_alt")
 
 
@@ -220,7 +224,7 @@ def cluster_loci(df: pd.DataFrame, window: int = 1_000_000) -> pd.DataFrame:
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"cluster_loci requires columns {sorted(missing)}")
-    work = df.sort_values(["pval", "variant_id"], kind="mergesort").reset_index()
+    work = df.reset_index(drop=True).sort_values(["pval", "variant_id"], kind="mergesort")
     chrom = work["chrom"].map(_chrom)
     pos = work["pos"].astype(float)
     gene = work["gene"].astype(str)
@@ -234,5 +238,4 @@ def cluster_loci(df: pd.DataFrame, window: int = 1_000_000) -> pd.DataFrame:
         group[(near | (gene == gene[i])) & group.isna()] = work.at[i, "variant_id"]
     work["locus_group"] = group
     work["is_lead"] = lead
-    out = work.set_index("index").loc[df.index, ["locus_group", "is_lead"]]
-    return df.join(out)
+    return df.reset_index(drop=True).join(work[["locus_group", "is_lead"]]).set_axis(df.index)
