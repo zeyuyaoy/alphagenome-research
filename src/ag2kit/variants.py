@@ -10,10 +10,12 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -22,6 +24,7 @@ from ag2kit.provenance import cache_dir
 log = logging.getLogger("ag2kit")
 
 BASES = frozenset("ACGT")
+ALLELE = re.compile(r"^[ACGTN]+$")
 PALINDROMIC = frozenset({("A", "T"), ("T", "A"), ("C", "G"), ("G", "C")})
 
 SEQUENCE_URL = "https://rest.ensembl.org/sequence/region/human/{region}?content-type=text/plain"
@@ -74,6 +77,19 @@ def is_palindromic(ref: str, alt: str) -> bool:
         Whether the two alleles are A/T or C/G in either order, ignoring case.
     """
     return (str(ref).upper(), str(alt).upper()) in PALINDROMIC
+
+
+def normalize_chrom(chrom: object) -> str:
+    """Formats a chromosome name as in GRCh38 UCSC style.
+
+    Args:
+        chrom: Name with or without the chr prefix. MT and chrMT become chrM.
+
+    Returns:
+        The chr-prefixed name.
+    """
+    name = "chr" + str(chrom).removeprefix("chr")
+    return "chrM" if name == "chrMT" else name
 
 
 def _chrom(chrom: object) -> str:
@@ -201,7 +217,13 @@ class ReferenceBase:
         return None
 
 
-def cluster_loci(df: pd.DataFrame, window: int = 1_000_000) -> pd.DataFrame:
+def cluster_loci(
+    df: pd.DataFrame,
+    window: int = 1_000_000,
+    *,
+    gene: str = "gene",
+    pval: str = "pval",
+) -> pd.DataFrame:
     """Labels one lead per locus using distance and gene as proxies for LD.
 
     Rows are visited by ascending p-value, breaking ties by variant ID.
@@ -209,8 +231,10 @@ def cluster_loci(df: pd.DataFrame, window: int = 1_000_000) -> pd.DataFrame:
     the window on the same chromosome, plus rows with the same gene.
 
     Args:
-        df: Table with variant_id, chrom, pos, gene, and pval columns.
+        df: Table with variant_id, chrom, pos, gene, and p-value columns.
         window: Maximum distance from the lead in base pairs.
+        gene: Gene column, for example "gene_id" for GTEx tables.
+        pval: P-value column, for example "pvalue" for GTEx tables.
 
     Returns:
         The input rows in original order with locus_group (the lead's variant
@@ -219,23 +243,83 @@ def cluster_loci(df: pd.DataFrame, window: int = 1_000_000) -> pd.DataFrame:
     Raises:
         ValueError: If a required column is missing.
     """
-    # shortcut: Quadratic scan suits small tables. Index by position if this becomes slow.
-    required = {"variant_id", "chrom", "pos", "gene", "pval"}
+    required = {"variant_id", "chrom", "pos", gene, pval}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"cluster_loci requires columns {sorted(missing)}")
-    work = df.reset_index(drop=True).sort_values(["pval", "variant_id"], kind="mergesort")
-    chrom = work["chrom"].map(_chrom)
-    pos = work["pos"].astype(float)
-    gene = work["gene"].astype(str)
-    group = pd.Series(pd.NA, index=work.index, dtype="object")
-    lead = pd.Series(False, index=work.index)
-    for i in work.index:
-        if pd.notna(group[i]):
+    work = df.reset_index(drop=True)
+    order = work.sort_values([pval, "variant_id"], kind="mergesort").index.to_numpy()
+    _, chrom = np.unique(work["chrom"].map(normalize_chrom).to_numpy(str), return_inverse=True)
+    _, genes = np.unique(work[gene].astype(str).to_numpy(), return_inverse=True)
+    pos = work["pos"].to_numpy(float)
+    ids = work["variant_id"].to_numpy(object)
+    group = np.full(len(work), None, dtype=object)
+    lead = np.zeros(len(work), dtype=bool)
+    for i in order:
+        if group[i] is not None:
             continue
         lead[i] = True
-        near = (chrom == chrom[i]) & (pos - pos[i]).abs().le(window)
-        group[(near | (gene == gene[i])) & group.isna()] = work.at[i, "variant_id"]
-    work["locus_group"] = group
-    work["is_lead"] = lead
-    return df.reset_index(drop=True).join(work[["locus_group", "is_lead"]]).set_axis(df.index)
+        near = ((chrom == chrom[i]) & (np.abs(pos - pos[i]) <= window)) | (genes == genes[i])
+        group[near & (group == None)] = ids[i]  # noqa: E711
+    out = df.copy()
+    out["locus_group"] = group
+    out["is_lead"] = lead
+    return out
+
+
+def _covered(pos0: np.ndarray, chrom: np.ndarray, regions: pd.DataFrame) -> np.ndarray:
+    hit = np.zeros(pos0.size, dtype=bool)
+    for name, iv in regions.groupby(regions["chromosome"].map(normalize_chrom)):
+        mask = chrom == name
+        if not mask.any():
+            continue
+        iv = iv.sort_values("start")
+        starts = iv["start"].to_numpy()
+        reach = np.maximum.accumulate(iv["end"].to_numpy())
+        i = np.searchsorted(starts, pos0[mask], side="right") - 1
+        hit[mask] = (i >= 0) & (reach[np.maximum(i, 0)] > pos0[mask])
+    return hit
+
+
+def annotate_folds(
+    df: pd.DataFrame, model_version: str = "FOLD_1", regions_path: str | None = None
+) -> pd.DataFrame:
+    """Labels variants by the training split of a cross-validation checkpoint.
+
+    A variant is "train" if any training region of the checkpoint contains it,
+    otherwise "valid" or "test" if a region of that split contains it, and
+    "none" if no region does. Evaluating with group="fold_subset" separates
+    performance on held-out regions from regions seen in training.
+
+    Args:
+        df: Table with chrom and 1-based pos columns on GRCh38.
+        model_version: Cross-validation checkpoint name, such as "FOLD_1".
+        regions_path: Local copy of the SDK's example-regions BED file. None
+            downloads the default file, which needs network access.
+
+    Returns:
+        A copy of df with a fold_subset column.
+
+    Raises:
+        ValueError: If model_version is ALL_FOLDS, which trains on every region.
+        KeyError: If the SDK does not know model_version.
+        ImportError: If the AlphaGenome SDK is unavailable.
+    """
+    from alphagenome.data import fold_intervals
+    from alphagenome.models.v1 import dna_client
+
+    if model_version == "ALL_FOLDS":
+        raise ValueError("ALL_FOLDS trains on every region; use a FOLD_ checkpoint")
+    version = dna_client.ModelVersion[model_version]
+    organism = dna_client.Organism.HOMO_SAPIENS
+    pos0 = df["pos"].to_numpy(dtype=np.int64) - 1
+    chrom = df["chrom"].map(normalize_chrom).to_numpy(str)
+    label = np.full(len(df), "none", dtype=object)
+    for subset in ("TEST", "VALID", "TRAIN"):
+        regions = fold_intervals.get_fold_intervals(
+            version, organism, fold_intervals.Subset[subset], regions_path
+        )
+        label[_covered(pos0, chrom, regions)] = subset.lower()
+    out = df.copy()
+    out["fold_subset"] = label
+    return out

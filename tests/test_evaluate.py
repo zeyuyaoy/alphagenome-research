@@ -324,3 +324,96 @@ def test_too_few_clusters_give_no_interval():
     p, o = synthetic(n_genes=3, per_gene=10)
     m = ag2kit.evaluate(p, o, n_boot=50).metrics
     assert m["ci95_low"].isna().all() and m["estimate"].notna().all()
+
+
+def test_evaluate_equals_join_then_evaluate_pairs():
+    p, o = synthetic()
+    ev = ag2kit.evaluate(p, o, group="tissue", n_boot=50, seed=2)
+    again = ag2kit.evaluate_pairs(ag2kit.join(p, o), group="tissue", n_boot=50, seed=2)
+    pd.testing.assert_frame_equal(ev.metrics, again.metrics)
+    pd.testing.assert_frame_equal(ev.per_group, again.per_group)
+
+
+def test_intervals_share_resamples_so_metric_order_does_not_matter(monkeypatch):
+    import sys
+
+    ev_mod = sys.modules["ag2kit.evaluate"]
+
+    p, o = synthetic(n_genes=20)
+    pairs = ag2kit.join(p, o)
+    first = ag2kit.evaluate_pairs(pairs, n_boot=100, seed=5).metrics.set_index("metric")
+    reversed_metrics = dict(reversed(list(ev_mod.METRICS.items())))
+    monkeypatch.setattr(ev_mod, "METRICS", reversed_metrics)
+    second = ag2kit.evaluate_pairs(pairs, n_boot=100, seed=5).metrics.set_index("metric")
+    pd.testing.assert_frame_equal(first, second.loc[first.index])
+
+
+def test_cluster_sampler_draws_whole_clusters():
+    from ag2kit.evaluate import _ClusterSampler
+
+    clusters = np.array(["b", "a", "b", "c", "a", "b"])
+    sampler = _ClusterSampler(clusters, np.random.default_rng(0))
+    for _ in range(50):
+        idx = sampler.draw()
+        drawn = pd.Series(clusters[idx]).value_counts()
+        sizes = pd.Series(clusters).value_counts()
+        assert all(drawn[c] % sizes[c] == 0 for c in drawn.index)
+        assert len(set(idx)) == sum(sizes[c] for c in drawn.index)
+
+
+def test_per_group_intervals_cover_group_estimates():
+    p, o = synthetic(n_genes=40, per_gene=6)
+    table = ag2kit.evaluate(p, o, group="tissue", n_boot=200).per_group
+    finite = table.dropna(subset=["ci95_low"])
+    assert len(finite) == 6
+    assert (finite["ci95_low"] <= finite["value"]).all()
+    assert (finite["value"] <= finite["ci95_high"]).all()
+
+
+def test_stratifying_the_ledger_by_prediction_magnitude():
+    p, o = synthetic(n_genes=40, per_gene=6)
+    pairs = ag2kit.join(p, o)
+    pairs["magnitude"] = pd.qcut(pairs["predicted"].abs(), 3, labels=["low", "mid", "high"])
+    table = ag2kit.evaluate_pairs(pairs, group="magnitude", n_boot=0).per_group
+    acc = table[table["metric"] == "sign_accuracy"].set_index("group")["value"]
+    assert acc["high"] > acc["low"]
+
+
+def test_compare_with_itself_is_exactly_zero():
+    p, o = synthetic()
+    pairs = ag2kit.join(p, o)
+    table = ag2kit.compare(pairs, pairs, n_boot=100).set_index("metric")
+    assert (table["difference"] == 0).all()
+    assert (table["ci95_low"] == 0).all() and (table["ci95_high"] == 0).all()
+
+
+def test_compare_detects_a_better_predictor_on_common_pairs():
+    p, o = synthetic(n_genes=60, per_gene=5)
+    good = ag2kit.join(p, o)
+    noisy = p.copy()
+    noisy["raw_effect"] = np.random.default_rng(9).normal(size=len(p))
+    noisy.loc[0, "status"] = "failed"
+    bad = ag2kit.join(noisy, o)
+    table = ag2kit.compare(good, bad, n_boot=300).set_index("metric")
+    assert table.loc["sign_auroc", "n_pairs"] == len(o) - 1
+    assert table.loc["sign_auroc", "ci95_low"] > 0
+    expected = ag2kit.evaluate_pairs(good.drop(index=0), n_boot=0).metrics.set_index("metric")
+    assert table.loc["sign_auroc", "estimate_a"] == expected.loc["sign_auroc", "estimate"]
+
+
+def test_compare_refuses_ledgers_from_different_observations():
+    p, o = synthetic()
+    a = ag2kit.join(p, o)
+    with pytest.raises(ValueError, match="same observed table"):
+        ag2kit.compare(a, a.iloc[::-1], n_boot=0)
+
+
+def test_evaluate_pairs_requires_a_ledger():
+    with pytest.raises(ValueError, match="ledger"):
+        ag2kit.evaluate_pairs(pd.DataFrame({"x": [1]}))
+
+
+def test_mitochondrial_names_match_across_conventions():
+    p = preds([("chrMT", 10, "A", "G", "G1", 0.5, "completed")])
+    o = obs([("M", 10, "A", "G", "G1", 0.2, "G")])
+    assert ag2kit.join(p, o)["pair_status"].tolist() == ["ok"]

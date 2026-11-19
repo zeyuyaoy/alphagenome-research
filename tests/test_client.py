@@ -585,3 +585,156 @@ def test_track_filter_through_score_variants(tmp_path):
         tracks={"imputation_mode": "observed"},
     )
     assert out.loc[0, "raw_effect"] == pytest.approx(0.3)
+
+
+def v01_fingerprint(conditioning):
+    import hashlib
+
+    import scipy.sparse as sp
+
+    h = hashlib.sha256()
+    x = conditioning.X
+    x = np.ascontiguousarray(x.toarray() if sp.issparse(x) else np.asarray(x))
+    h.update(f"{x.dtype}{x.shape}".encode())
+    h.update(x.tobytes())
+    names = [list(map(str, n)) for n in (conditioning.obs_names, conditioning.var_names)]
+    h.update(json.dumps(names).encode())
+    return h.hexdigest()
+
+
+@pytest.mark.parametrize("fmt", ["dense", "csr", "csc"])
+def test_fingerprint_matches_v0_1_so_existing_caches_stay_valid(fmt):
+    import anndata as ad
+    import scipy.sparse as sp
+
+    x = sp.random(200, 50, density=0.1, format="csr", random_state=0, dtype=np.float32)
+    x = {"dense": x.toarray(), "csr": x, "csc": x.tocsc()}[fmt]
+    adata = ad.AnnData(X=x)
+    assert ag2.conditioning_fingerprint(adata) == v01_fingerprint(adata)
+
+
+def test_conditioning_is_hashed_once_per_batch(tmp_path, monkeypatch):
+    calls = []
+    real = ag2.conditioning_fingerprint
+    monkeypatch.setattr(ag2, "conditioning_fingerprint", lambda c: calls.append(1) or real(c))
+    variants = pd.DataFrame({"chrom": "21", "pos": 41422154, "ref": "T", "alt": list("CGA")})
+    live(tmp_path).score_variants(
+        variants,
+        conditioning=cells(),
+        condition_label="control",
+        scorer="SC_GENE_EXPRESSION_DENOISED",
+    )
+    assert len(calls) == 1
+
+
+def tidy_table(draw_values, genes, strands, track_strands):
+    rows = [
+        {
+            "gene_id": g,
+            "gene_strand": s,
+            "track_strand": t,
+            "track_name": f"t{j}",
+            "imputation_mode": "observed" if j % 2 else "imputed",
+            "raw_score": v,
+        }
+        for (g, s), vals in zip(zip(genes, strands, strict=True), draw_values, strict=True)
+        for j, (t, v) in enumerate(zip(track_strands, vals, strict=True))
+    ]
+    return pd.DataFrame(rows)
+
+
+def reduce_or_error(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as exc:
+        return str(exc)
+
+
+from hypothesis import given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    st.integers(1, 4).flatmap(
+        lambda n_genes: st.tuples(
+            st.lists(
+                st.lists(
+                    st.one_of(st.floats(-5, 5), st.just(float("nan"))), min_size=3, max_size=3
+                ),
+                min_size=n_genes,
+                max_size=n_genes,
+            ),
+            st.lists(st.sampled_from("+-"), min_size=n_genes, max_size=n_genes),
+        )
+    ),
+    st.lists(st.sampled_from("+-."), min_size=3, max_size=3),
+    st.sampled_from([None, {"imputation_mode": "observed"}, {"missing": "x"}]),
+)
+def test_indexed_reduction_equals_reduce_gene_effect(gene_data, track_strands, tracks):
+    values, strands = gene_data
+    genes = [f"ENSG{i:011d}.{i}" for i in range(len(values))]
+    tidy = tidy_table(values, genes, strands, track_strands)
+    out = ag2._Outcome(tidy, "completed")
+    for gene in [*genes, "ENSG00000000000", "ENSG99999999999"]:
+        expected = reduce_or_error(ag2.reduce_gene_effect, tidy, gene, tracks)
+        assert reduce_or_error(out.reduce, gene, tracks) == expected
+
+
+def test_retry_delays_grow_with_jitter_and_are_capped(monkeypatch):
+    client = ag2.AG2Client(backoff=10)
+    monkeypatch.setattr(ag2.random, "uniform", lambda a, b: b)
+    assert [client._delay(k) for k in (1, 2, 3)] == [10, 20, 40]
+    monkeypatch.setattr(ag2.random, "uniform", lambda a, b: a)
+    assert [client._delay(k) for k in (1, 2)] == [5, 10]
+    assert client._delay(20) == ag2.MAX_BACKOFF / 2
+
+
+def test_retries_sleep_between_attempts(tmp_path, monkeypatch):
+    slept = []
+    monkeypatch.setattr(ag2.time, "sleep", slept.append)
+    model = FakeModel(fail=lambda kw: FakeRpcError("UNAVAILABLE"))
+    rec = live(tmp_path, model, backoff=1, max_retries=3).score(spec())
+    assert rec["attempts"] == 3 and len(slept) == 2 and 1 <= slept[1] <= 2
+
+
+def test_silently_corrupted_cache_values_are_detected(tmp_path):
+    import struct
+
+    client = live(tmp_path)
+    values = np.random.default_rng(1).normal(size=50)
+    client._write_cache("k", pd.DataFrame({"raw_score": values}), {"cache_key": "k"})
+    path = client._cache_path("k")
+    data = bytearray(path.read_bytes())
+    data[data.find(struct.pack("<d", values[10]))] ^= 1
+    path.write_bytes(data)
+    assert client._read_cache("k") is None
+
+
+def test_cache_entries_written_without_checksums_are_still_read(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    client = live(tmp_path)
+    first = client.score(spec())
+    path = client._cache_path(first["cache_key"])
+    table = pq.read_table(path)
+    pq.write_table(
+        pa.Table.from_pandas(table.to_pandas()).replace_schema_metadata(table.schema.metadata), path
+    )
+    again = live(tmp_path, FakeModel(fail=lambda kw: RuntimeError("must not be called")))
+    assert again.score(spec())["from_cache"] is True
+
+
+def test_interrupt_cancels_pending_requests(tmp_path):
+    def stop(kw):
+        raise KeyboardInterrupt
+
+    model = FakeModel(fail=stop)
+    with pytest.raises(KeyboardInterrupt):
+        live(tmp_path, model).score_many([spec(pos=41422154 + i) for i in range(20)], max_workers=1)
+    assert len(model.calls) <= 2
+
+
+def test_mitochondrial_names_are_normalised():
+    assert spec(chrom="MT").chrom == spec(chrom="chrM").chrom == "chrM"

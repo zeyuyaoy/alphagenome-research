@@ -13,7 +13,7 @@ from ag2kit.client import (
     interaction,
     reduce_gene_effect,
 )
-from ag2kit.evaluate import Evaluation, evaluate, sign_accuracy
+from ag2kit.evaluate import Evaluation, compare, evaluate, evaluate_pairs, join
 from ag2kit.io import read_variants
 from ag2kit.provenance import Run, read_table, write_table
 from ag2kit.stats import (
@@ -23,10 +23,11 @@ from ag2kit.stats import (
     concordance,
     no_call_threshold,
     recall_at_sign_accuracy,
+    sign_accuracy,
     sign_auroc,
     spearman,
 )
-from ag2kit.variants import ReferenceBase, cluster_loci, harmonize_effect
+from ag2kit.variants import ReferenceBase, annotate_folds, cluster_loci, harmonize_effect
 
 try:
     __version__ = version("ag2kit")
@@ -44,15 +45,19 @@ __all__ = [
     "Run",
     "ScoringError",
     "__version__",
+    "annotate_folds",
     "by_group",
     "classify",
     "cluster_loci",
+    "compare",
     "concordance",
     "evaluate",
+    "evaluate_pairs",
     "extract_gene_effect",
     "gtex",
     "harmonize_effect",
     "interaction",
+    "join",
     "no_call_threshold",
     "read_table",
     "read_variants",

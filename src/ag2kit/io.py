@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_integer_dtype, is_unsigned_integer_dtype
 
+from ag2kit.variants import ALLELE, normalize_chrom
+
 OUTPUT_COLUMNS = (
     "variant_id",
     "chrom",
@@ -30,7 +32,6 @@ _ALIASES = {
 }
 _ID_COLUMNS = ("source_id", "id", "variant_id", "rsid")
 _VCF_SUFFIXES = (".vcf", ".vcf.gz", ".vcf.bgz", ".bcf")
-_ALLELE = re.compile(r"^[ACGTN]+$")
 _MISSING = frozenset({"", "."})
 _BUILDS = {
     "GRCh37": "grch37|hg19|b37|hs37d5|human_g1k_v37|g1k_v37|assembly19",
@@ -48,11 +49,6 @@ def _pysam() -> Any:
             'Reading VCF/BCF or FASTA needs pysam: pip install "ag2kit[vcf]"'
         ) from exc
     return pysam
-
-
-def _chrom(chrom: object) -> str:
-    chrom = "chr" + str(chrom).removeprefix("chr")
-    return "chrM" if chrom == "chrMT" else chrom
 
 
 def _alleles(column: pd.Series) -> pd.Series:
@@ -154,7 +150,7 @@ def _status(chrom: str, pos: int, ref: str, alt: str, fasta: Any, references: se
         return "missing_allele"
     if alt == "*" or alt.startswith("<") or "[" in alt or "]" in alt:
         return "symbolic_allele"
-    if not (_ALLELE.match(ref) and _ALLELE.match(alt)):
+    if not (ALLELE.match(ref) and ALLELE.match(alt)):
         return "invalid_allele"
     if ref == alt:
         return "ref_equals_alt"
@@ -225,7 +221,7 @@ def read_variants(
             raise ValueError(f"unrecognised variant file type: {path.name}")
 
     out = pd.DataFrame(index=core.index)
-    out["chrom"] = core["chrom"].map(_chrom).astype(object)
+    out["chrom"] = core["chrom"].map(normalize_chrom).astype(object)
     out["pos"] = core["pos"].astype("int64")
     out["ref"] = _alleles(core["ref"])
     out["alt"] = _alleles(core["alt"])
