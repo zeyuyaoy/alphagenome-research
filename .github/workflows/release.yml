@@ -1,0 +1,38 @@
+# Publishes to PyPI with trusted publishing (no API token stored in GitHub).
+# Runs only when started by hand, and the `pypi` environment should require a reviewer.
+# One-time setup: add this repository and workflow as a trusted publisher for `ag2kit`
+# on pypi.org, and create the `pypi` environment with required reviewers.
+name: release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --extra model --extra vcf
+      - run: uv run pytest
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ag2kit/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
