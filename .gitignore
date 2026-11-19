@@ -1,0 +1,24 @@
+# Local data, downloads, model responses and run output: never committed.
+cache/
+results/
+.env
+
+# Python and tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+coverage.xml
+dist/
+build/
+*.egg-info/
+
+# Editors and OS
+.claude/
+.idea/
+.vscode/
+.DS_Store
