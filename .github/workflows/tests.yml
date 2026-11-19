@@ -1,0 +1,47 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra model --extra vcf --python ${{ matrix.python }}
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest --cov --cov-report=term-missing
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - name: Install the wheel without extras and import it outside the source tree
+        run: |
+          uv venv /tmp/wheel-env --python 3.11
+          uv pip install --python /tmp/wheel-env/bin/python dist/*.whl
+          cd /tmp && /tmp/wheel-env/bin/python -c "import ag2kit; print(ag2kit.__version__)"
+      - name: Run the sdist's tests against the wheel with the newest dependencies
+        run: |
+          uv venv /tmp/full-env --python 3.13
+          uv pip install --python /tmp/full-env/bin/python "$(ls dist/*.whl)[model,vcf]" pytest anndata hypothesis
+          mkdir /tmp/sdist && tar xzf dist/*.tar.gz -C /tmp/sdist
+          cd /tmp/sdist/ag2kit-* && rm -rf src && /tmp/full-env/bin/python -m pytest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
