@@ -9,10 +9,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import requests
 
 import ag2kit
+from ag2kit import gtex
 from ag2kit import variants as va
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -61,8 +63,6 @@ def test_network_errors_in_reference_lookup_return_none(tmp_path, monkeypatch):
 
 
 def test_cluster_loci_ignores_chr_prefix():
-    import pandas as pd
-
     df = pd.DataFrame(
         {
             "variant_id": ["a", "b"],
@@ -75,6 +75,34 @@ def test_cluster_loci_ignores_chr_prefix():
     out = ag2kit.cluster_loci(df)
     assert out["is_lead"].tolist() == [False, True]
     assert out["locus_group"].tolist() == ["b", "b"]
+
+
+def test_empty_gtex_release_file_returns_observed_schema(tmp_path):
+    path = tmp_path / "pairs.tsv"
+    path.write_text("variant_id\tgene_id\tslope\tpval_nominal\n")
+
+    pairs = gtex.read_signif_pairs(path, "Whole_Blood", "gtex_v10")
+
+    assert pairs.empty
+    assert tuple(pairs.columns) == gtex.COLUMNS
+
+
+@pytest.mark.parametrize(
+    "variant", ["chr1_101_C_T_b38_extra", "", "chr1_101__T_b38", "chr1_0_C_T_b38"]
+)
+def test_gtex_release_reports_the_actual_invalid_variant(tmp_path, variant):
+    path = tmp_path / "pairs.tsv"
+    path.write_text(
+        "variant_id\tgene_id\tslope\tpval_nominal\n"
+        "chr1_100_A_G_b38\tENSG1.1\t1\t0.001\n"
+        f"{variant}\tENSG1.1\t1\t0.001\n"
+    )
+
+    with pytest.raises(ValueError, match="unexpected GTEx variant id") as exc:
+        gtex.read_signif_pairs(path, "Whole_Blood", "gtex_v10")
+
+    expected = repr(variant) if variant else "nan"
+    assert expected in str(exc.value)
 
 
 def test_empty_null_set_is_an_error_not_a_zero_threshold():

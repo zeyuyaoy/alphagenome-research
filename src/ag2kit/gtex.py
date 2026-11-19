@@ -159,9 +159,10 @@ def tissues(dataset: str = "gtex_v10", refresh: bool = False) -> pd.DataFrame:
 
 
 def _split_variant(variant: pd.Series) -> pd.DataFrame:
-    parts = variant.str.split("_", expand=True)
-    if parts.shape[1] != 5 or not (parts[4] == "b38").all():
-        bad = variant[(parts.shape[1] != 5) | (parts.iloc[:, -1] != "b38")].iloc[0]
+    parts = variant.astype(str).str.extract(r"^([^_]+)_(0*[1-9][0-9]*)_([^_]+)_([^_]+)_b38\Z")
+    invalid = parts[0].isna()
+    if invalid.any():
+        bad = variant[invalid].iloc[0]
         raise ValueError(f"unexpected GTEx variant id {bad!r} (want chr_pos_ref_alt_b38)")
     return pd.DataFrame(
         {"chrom": parts[0], "pos": parts[1].astype("int64"), "ref": parts[2], "alt": parts[3]}
@@ -169,8 +170,10 @@ def _split_variant(variant: pd.Series) -> pd.DataFrame:
 
 
 def _finish(df: pd.DataFrame, dataset: str, source: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=list(COLUMNS))
     df = df.drop(columns=["chrom", "chromosome", "pos", "ref", "alt"], errors="ignore")
-    df = pd.concat([_split_variant(df["source_id"]).set_index(df.index), df], axis=1)
+    df = pd.concat([_split_variant(df["source_id"]), df], axis=1)
     df["variant_id"] = df["chrom"] + ":" + df["pos"].astype(str) + ":" + df["ref"] + ">" + df["alt"]
     df["gene_id"] = df["gencode_id"].str.split(".").str[0]
     df["effect_allele"] = df["alt"]
@@ -221,8 +224,6 @@ def eqtls(
             log.info("no significant %s eQTLs for %s in %s", dataset, gid, tissue)
         frames.append(pd.DataFrame(rows))
     raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if raw.empty:
-        return pd.DataFrame(columns=list(COLUMNS))
     df = raw.rename(
         columns={
             "variantId": "source_id",
