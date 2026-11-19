@@ -1,0 +1,227 @@
+{
+ "eqtl": {
+  "url": "https://gtexportal.org/api/v2/association/singleTissueEqtl?gencodeId=ENSG00000157601.15&tissueSiteDetailId=Whole_Blood&datasetId=gtex_v10&page=0&itemsPerPage=1000",
+  "retrieved_utc": "2026-11-19T09:38:02Z",
+  "response": {
+   "data": [
+    {
+     "snpId": "rs368750",
+     "pos": 41394865,
+     "snpIdUpper": "RS368750",
+     "variantId": "chr21_41394865_G_A_b38",
+     "geneSymbol": "MX1",
+     "pValue": 5.248326379943783e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.1338159590959549
+    },
+    {
+     "snpId": "rs81481",
+     "pos": 41399435,
+     "snpIdUpper": "RS81481",
+     "variantId": "chr21_41399435_T_C_b38",
+     "geneSymbol": "MX1",
+     "pValue": 3.2031229867622135e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.1353072226047516
+    },
+    {
+     "snpId": "rs121641",
+     "pos": 41399507,
+     "snpIdUpper": "RS121641",
+     "variantId": "chr21_41399507_A_G_b38",
+     "geneSymbol": "MX1",
+     "pValue": 7.482665977170346e-06,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.14589378237724304
+    },
+    {
+     "snpId": "rs77518",
+     "pos": 41399519,
+     "snpIdUpper": "RS77518",
+     "variantId": "chr21_41399519_A_C_b38",
+     "geneSymbol": "MX1",
+     "pValue": 5.786125642277584e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.13208164274692535
+    },
+    {
+     "snpId": "rs73905358",
+     "pos": 41401895,
+     "snpIdUpper": "RS73905358",
+     "variantId": "chr21_41401895_T_C_b38",
+     "geneSymbol": "MX1",
+     "pValue": 4.383938453086722e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": 0.37440961599349976
+    },
+    {
+     "snpId": "rs466092",
+     "pos": 41402614,
+     "snpIdUpper": "RS466092",
+     "variantId": "chr21_41402614_A_G_b38",
+     "geneSymbol": "MX1",
+     "pValue": 2.0353511363337913e-06,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.15598858892917633
+    },
+    {
+     "snpId": "rs466106",
+     "pos": 41402686,
+     "snpIdUpper": "RS466106",
+     "variantId": "chr21_41402686_A_G_b38",
+     "geneSymbol": "MX1",
+     "pValue": 6.325016795908481e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.13115541636943817
+    },
+    {
+     "snpId": "rs466110",
+     "pos": 41402709,
+     "snpIdUpper": "RS466110",
+     "variantId": "chr21_41402709_A_G_b38",
+     "geneSymbol": "MX1",
+     "pValue": 2.2279832389520515e-06,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.15655933320522308
+    },
+    {
+     "snpId": "rs73905359",
+     "pos": 41403760,
+     "snpIdUpper": "RS73905359",
+     "variantId": "chr21_41403760_C_T_b38",
+     "geneSymbol": "MX1",
+     "pValue": 1.753270854008768e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": 0.33354583382606506
+    },
+    {
+     "snpId": "rs448514",
+     "pos": 41405754,
+     "snpIdUpper": "RS448514",
+     "variantId": "chr21_41405754_A_G_b38",
+     "geneSymbol": "MX1",
+     "pValue": 2.773479915949061e-05,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.13527661561965942
+    },
+    {
+     "snpId": "rs35151570",
+     "pos": 41405897,
+     "snpIdUpper": "RS35151570",
+     "variantId": "chr21_41405897_G_GT_b38",
+     "geneSymbol": "MX1",
+     "pValue": 2.685027902304836e-06,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.15261928737163544
+    },
+    {
+     "snpId": "rs367562",
+     "pos": 41406459,
+     "snpIdUpper": "RS367562",
+     "variantId": "chr21_41406459_T_A_b38",
+     "geneSymbol": "MX1",
+     "pValue": 5.087816543225224e-07,
+     "geneSymbolUpper": "MX1",
+     "datasetId": "gtex_v10",
+     "tissueSiteDetailId": "Whole_Blood",
+     "ontologyId": "UBERON:0013756",
+     "chromosome": "chr21",
+     "gencodeId": "ENSG00000157601.15",
+     "nes": -0.15608111023902893
+    }
+   ],
+   "paging_info": {
+    "numberOfPages": 1,
+    "page": 0,
+    "maxItemsPerPage": 1000,
+    "totalNumberOfItems": 146
+   }
+  }
+ },
+ "gene": {
+  "url": "https://gtexportal.org/api/v2/reference/gene?geneId=ENSG00000157601&gencodeVersion=v39&genomeBuild=GRCh38%2Fhg38",
+  "retrieved_utc": "2026-11-19T09:38:02Z",
+  "response": {
+   "data": [
+    {
+     "chromosome": "chr21",
+     "dataSource": "HAVANA",
+     "description": "MX dynamin like GTPase 1 [Source:HGNC Symbol;Acc:HGNC:7532]",
+     "end": 41470071,
+     "entrezGeneId": 4599,
+     "gencodeId": "ENSG00000157601.15",
+     "gencodeVersion": "v39",
+     "geneStatus": "",
+     "geneSymbol": "MX1",
+     "geneSymbolUpper": "MX1",
+     "geneType": "protein coding",
+     "genomeBuild": "GRCh38/hg38",
+     "start": 41420020,
+     "strand": "+",
+     "tss": 41420020
+    }
+   ],
+   "paging_info": {
+    "numberOfPages": 1,
+    "page": 0,
+    "maxItemsPerPage": 250,
+    "totalNumberOfItems": 1
+   }
+  }
+ }
+}
