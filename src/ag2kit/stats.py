@@ -6,17 +6,20 @@ Experimental validation would require an independent measurement of the variant 
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 from scipy import stats
 
 CONCORDANT, DISCORDANT, NO_CALL = "concordant", "discordant", "no_call"
 NO_COMPARATOR = "no_comparator"
 
 
-def no_call_threshold(null_deltas, quantile: float = 0.90) -> float:
+def no_call_threshold(null_deltas: Iterable[float], quantile: float = 0.90) -> float:
     """Derives a no-call threshold from absolute scores under a null comparison.
 
     Args:
@@ -138,7 +141,9 @@ class Concordance:
         }
 
 
-def concordance(deltas, betas, threshold: float = 0.0) -> tuple[Concordance, list[str]]:
+def concordance(
+    deltas: Iterable[float], betas: Iterable[float], threshold: float = 0.0
+) -> tuple[Concordance, list[str]]:
     """Tests sign concordance against 0.5 with a two-sided exact binomial test.
 
     Args:
@@ -174,7 +179,7 @@ def concordance(deltas, betas, threshold: float = 0.0) -> tuple[Concordance, lis
     )
 
 
-def _pairs(deltas, betas) -> tuple[np.ndarray, np.ndarray]:
+def _pairs(deltas: ArrayLike, betas: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
     d = np.asarray(deltas, dtype=float)
     b = np.asarray(betas, dtype=float)
     if d.shape != b.shape:
@@ -183,7 +188,7 @@ def _pairs(deltas, betas) -> tuple[np.ndarray, np.ndarray]:
     return d[ok], b[ok]
 
 
-def spearman(deltas, betas, absolute: bool = False) -> dict:
+def spearman(deltas: ArrayLike, betas: ArrayLike, absolute: bool = False) -> dict:
     """Computes Spearman correlation after dropping non-finite pairs.
 
     Args:
@@ -208,7 +213,7 @@ def spearman(deltas, betas, absolute: bool = False) -> dict:
     return {"rho": float(res.statistic), "p_value": float(res.pvalue), "n": int(d.size)}
 
 
-def sign_auroc(deltas, betas) -> float:
+def sign_auroc(deltas: ArrayLike, betas: ArrayLike) -> float:
     """Computes how well signed predictions rank positive above negative effects.
 
     This is the sign metric used in the Borzoi and AlphaGenome eQTL benchmarks.
@@ -232,7 +237,28 @@ def sign_auroc(deltas, betas) -> float:
     return float(u / (pos.size * neg.size))
 
 
-def recall_at_sign_accuracy(deltas, betas, accuracy: float = 0.9) -> dict:
+def sign_accuracy(deltas: ArrayLike, betas: ArrayLike) -> float:
+    """Computes the fraction of comparable effects with matching signs.
+
+    Args:
+        deltas: Predicted effects.
+        betas: Observed effects in the same order and allele orientation.
+
+    Returns:
+        Sign accuracy after excluding non-finite pairs and zero betas,
+        or NaN if no pairs remain. Zero predictions count as incorrect.
+
+    Raises:
+        ValueError: If the inputs have different shapes.
+    """
+    d, b = _pairs(deltas, betas)
+    ok = b != 0
+    if not ok.any():
+        return float("nan")
+    return float(np.mean(np.sign(d[ok]) == np.sign(b[ok])))
+
+
+def recall_at_sign_accuracy(deltas: ArrayLike, betas: ArrayLike, accuracy: float = 0.9) -> dict:
     """Finds the longest ranked prefix meeting a target sign accuracy.
 
     Pairs are ranked by decreasing absolute prediction, with ties resolved
@@ -267,7 +293,13 @@ def recall_at_sign_accuracy(deltas, betas, accuracy: float = 0.9) -> dict:
     return {"recall": k / d.size, "n_called": k, "n": int(d.size), "min_abs_delta": cutoff}
 
 
-def by_group(metric, deltas, betas, groups, min_size: int = 2) -> tuple[float, pd.DataFrame]:
+def by_group(
+    metric: Callable[[np.ndarray, np.ndarray], float],
+    deltas: ArrayLike,
+    betas: ArrayLike,
+    groups: ArrayLike,
+    min_size: int = 2,
+) -> tuple[float, pd.DataFrame]:
     """Computes a metric per group and averages it by group size.
 
     Args:
@@ -293,7 +325,7 @@ def by_group(metric, deltas, betas, groups, min_size: int = 2) -> tuple[float, p
     return weighted, table
 
 
-def mcnemar(calls_a, calls_b) -> dict:
+def mcnemar(calls_a: Iterable[str], calls_b: Iterable[str]) -> dict:
     """Compares two sets of calls on the same pairs with an exact McNemar test.
 
     Args:
@@ -323,7 +355,7 @@ def mcnemar(calls_a, calls_b) -> dict:
     return {"a_better": a_only, "b_better": b_only, "n_discordant_pairs": n, "p_exact": p}
 
 
-def monte_carlo_summary(values, seeds, first_half) -> dict:
+def monte_carlo_summary(values: ArrayLike, seeds: ArrayLike, first_half: Iterable[Any]) -> dict:
     """Summarizes sampling variability across conditioning draws for one variant.
 
     A direction is resolved when the absolute mean meets the 95% t margin,

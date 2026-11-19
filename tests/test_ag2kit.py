@@ -8,7 +8,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+import ag2kit
 from ag2kit import client as ag2
 from ag2kit import stats as ev
 from ag2kit import variants as va
@@ -295,3 +298,74 @@ def test_monte_carlo_summary_needs_both_the_interval_and_the_halves():
         ev.monte_carlo_summary([0.1, float("nan")], [1, 2], [1])
     with pytest.raises(ValueError):
         ev.monte_carlo_summary([0.1, 0.2], [1, 2], [1, 2])
+
+
+def v01_cluster_loci(df, window):
+    work = df.reset_index(drop=True).sort_values(["pval", "variant_id"], kind="mergesort")
+    chrom = work["chrom"].map(lambda c: str(c).removeprefix("chr"))
+    pos, gene = work["pos"].astype(float), work["gene"].astype(str)
+    group = pd.Series(pd.NA, index=work.index, dtype="object")
+    for i in work.index:
+        if pd.notna(group[i]):
+            continue
+        near = (chrom == chrom[i]) & (pos - pos[i]).abs().le(window)
+        group[(near | (gene == gene[i])) & group.isna()] = work.at[i, "variant_id"]
+    return group.sort_index().tolist()
+
+
+@settings(max_examples=50, deadline=None)
+@given(
+    st.lists(
+        st.tuples(
+            st.sampled_from(["1", "chr1", "2"]),
+            st.integers(1, 5000),
+            st.sampled_from(["G1", "G2", "G3", "G4"]),
+            st.floats(1e-10, 1),
+        ),
+        min_size=1,
+        max_size=40,
+    ),
+    st.sampled_from([0, 100, 1000]),
+)
+def test_cluster_loci_matches_the_reference_scan(rows, window):
+    df = pd.DataFrame(rows, columns=["chrom", "pos", "gene", "pval"])
+    df["variant_id"] = [f"v{i}" for i in range(len(df))]
+    assert va.cluster_loci(df, window)["locus_group"].tolist() == v01_cluster_loci(df, window)
+
+
+def test_cluster_loci_accepts_gtex_column_names():
+    df = pd.DataFrame(
+        {
+            "variant_id": ["a", "b"],
+            "chrom": "chr1",
+            "pos": [1, 5_000_000],
+            "gene_id": ["G", "G"],
+            "pvalue": [0.1, 0.01],
+        }
+    )
+    out = va.cluster_loci(df, gene="gene_id", pval="pvalue")
+    assert out["locus_group"].tolist() == ["b", "b"]
+
+
+def test_annotate_folds_labels_by_containing_split(tmp_path):
+    pytest.importorskip("alphagenome")
+    bed = tmp_path / "regions.bed"
+    bed.write_text(
+        "chr1\t0\t100\tfold4\nchr1\t50\t150\tfold0\nchr1\t200\t300\tfold3\n"
+        "chr2\t0\t1000\tfold4\nchr2\t10\t20\tfold1\n"
+    )
+    df = pd.DataFrame(
+        {"chrom": ["1", "chr1", "1", "1", "2", "2", "3"], "pos": [10, 60, 250, 175, 15, 500, 5]}
+    )
+    out = ag2kit.annotate_folds(df, "FOLD_1", str(bed))
+    assert out["fold_subset"].tolist() == [
+        "test",
+        "train",
+        "valid",
+        "none",
+        "train",
+        "test",
+        "none",
+    ]
+    with pytest.raises(ValueError, match="ALL_FOLDS"):
+        ag2kit.annotate_folds(df, "ALL_FOLDS", str(bed))

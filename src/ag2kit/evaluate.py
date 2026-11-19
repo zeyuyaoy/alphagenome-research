@@ -16,34 +16,13 @@ import numpy as np
 import pandas as pd
 
 from ag2kit.provenance import software_versions, utc_now
-from ag2kit.stats import _pairs, by_group, sign_auroc, spearman
-from ag2kit.variants import harmonize_effect
+from ag2kit.stats import sign_accuracy, sign_auroc, spearman
+from ag2kit.variants import harmonize_effect, normalize_chrom
 
 Metric = Callable[[np.ndarray, np.ndarray], float]
 
 
-def sign_accuracy(deltas, betas) -> float:
-    """Computes the fraction of comparable effects with matching signs.
-
-    Args:
-        deltas: Predicted effects.
-        betas: Observed effects in the same order and allele orientation.
-
-    Returns:
-        Sign accuracy after excluding non-finite pairs and zero betas,
-        or NaN if no pairs remain. Zero predictions count as incorrect.
-
-    Raises:
-        ValueError: If the inputs have different shapes.
-    """
-    d, b = _pairs(deltas, betas)
-    ok = b != 0
-    if not ok.any():
-        return float("nan")
-    return float(np.mean(np.sign(d[ok]) == np.sign(b[ok])))
-
-
-def _rho(deltas, betas) -> float:
+def _rho(deltas: np.ndarray, betas: np.ndarray) -> float:
     return spearman(deltas, betas)["rho"]
 
 
@@ -60,7 +39,7 @@ def _key(df: pd.DataFrame) -> pd.DataFrame:
     alt = df["alt"].astype("string").str.upper()
     return pd.DataFrame(
         {
-            "_chrom": "chr" + df["chrom"].astype("string").str.removeprefix("chr"),
+            "_chrom": df["chrom"].map(normalize_chrom, na_action="ignore").astype("string"),
             "_pos": pd.to_numeric(df["pos"], errors="coerce").astype("Int64"),
             "_alleles": (ref + "/" + alt).where(ref < alt, alt + "/" + ref),
             "_gene": df["gene_id"].astype("string").str.split(".").str[0],
@@ -198,22 +177,29 @@ def join(
 
     status, beta_alt, flipped = [], [], []
     counts = merged["_n_pred"].fillna(0).to_numpy(dtype=int)
-    for (i, row), n in zip(out.iterrows(), counts, strict=True):
+    rows = zip(
+        counts,
+        merged["_variant_failed"],
+        out["pred_status"].astype(str),
+        out["predicted"],
+        out["ref"].astype(str).str.upper(),
+        out["pred_ref"].astype(str).str.upper(),
+        out["pred_alt"],
+        out["beta"],
+        out["effect_allele"],
+        strict=True,
+    )
+    for n, variant_failed, pred_status, predicted, ref, pred_ref, pred_alt, beta, allele in rows:
         if n == 0:
-            gone = "prediction_failed" if merged.at[i, "_variant_failed"] else "no_prediction"
-            s, b, f = gone, np.nan, False
+            s, b, f = ("prediction_failed" if variant_failed else "no_prediction"), np.nan, False
         elif n > 1:
             s, b, f = "ambiguous_prediction", np.nan, False
-        elif str(row["pred_status"]) != "completed" or not np.isfinite(row["predicted"]):
+        elif pred_status != "completed" or not np.isfinite(predicted):
             s, b, f = "prediction_failed", np.nan, False
-        elif forward_strand and str(row["ref"]).upper() != str(row["pred_ref"]).upper():
-            # Swapping genomic REF and ALT changes the model input, so negation
-            # cannot recover the effect of the intended comparison.
+        elif forward_strand and ref != pred_ref:
             s, b, f = "ref_mismatch", np.nan, False
         else:
-            h = harmonize_effect(
-                row["beta"], row["effect_allele"], row["pred_ref"], row["pred_alt"], forward_strand
-            )
+            h = harmonize_effect(beta, allele, pred_ref, pred_alt, forward_strand)
             s, f = h.status, h.flipped
             b = np.nan if h.estimate is None else h.estimate
         status.append(s)
@@ -225,26 +211,162 @@ def join(
     return out
 
 
-def _bootstrap(
+def _usable(pairs: pd.DataFrame) -> pd.DataFrame:
+    missing = {"pair_status", "predicted", "beta_alt"} - set(pairs.columns)
+    if missing:
+        raise ValueError(f"pairs is missing ledger columns {sorted(missing)}; build it with join")
+    return pairs[(pairs["pair_status"] == "ok") & (pairs["beta_alt"] != 0)]
+
+
+def _codes(values: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    labels, codes = np.unique(values.astype(str).to_numpy(), return_inverse=True)
+    return labels, codes.astype(np.intp)
+
+
+class _ClusterSampler:
+    """Draws cluster bootstrap resamples as row indices, vectorized over clusters."""
+
+    def __init__(self, clusters: np.ndarray, rng: np.random.Generator):
+        _, inverse = np.unique(clusters, return_inverse=True)
+        self.order = np.argsort(inverse, kind="stable")
+        self.sizes = np.bincount(inverse)
+        self.starts = np.concatenate([[0], np.cumsum(self.sizes)[:-1]])
+        self.n_clusters = self.sizes.size
+        self.rng = rng
+
+    def draw(self) -> np.ndarray:
+        chosen = self.rng.integers(0, self.n_clusters, self.n_clusters)
+        sizes = self.sizes[chosen]
+        offsets = np.arange(sizes.sum()) - np.repeat(np.cumsum(sizes) - sizes, sizes)
+        return self.order[np.repeat(self.starts[chosen], sizes) + offsets]
+
+
+def _estimate(
     metric: Metric,
     d: np.ndarray,
     b: np.ndarray,
-    clusters: np.ndarray,
-    groups: np.ndarray | None,
-    n_boot: int,
-    rng: np.random.Generator,
+    codes: np.ndarray | None,
+    n_groups: int,
     min_group: int,
-) -> np.ndarray:
-    labels, inverse = np.unique(clusters, return_inverse=True)
-    members = [np.flatnonzero(inverse == k) for k in range(labels.size)]
-    stats = np.empty(n_boot)
-    for i in range(n_boot):
-        idx = np.concatenate([members[k] for k in rng.integers(0, labels.size, labels.size)])
-        if groups is None:
-            stats[i] = metric(d[idx], b[idx])
-        else:
-            stats[i] = by_group(metric, d[idx], b[idx], groups[idx], min_group)[0]
-    return stats
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Returns the pooled or group-size-weighted estimate, group values, and group sizes."""
+    if codes is None:
+        return float(metric(d, b)), np.empty(0), np.empty(0, dtype=int)
+    sizes = np.bincount(codes, minlength=n_groups)
+    members = np.split(np.argsort(codes, kind="stable"), np.cumsum(sizes)[:-1])
+    values = np.array([float(metric(d[m], b[m])) if m.size else np.nan for m in members])
+    use = (sizes >= min_group) & np.isfinite(values)
+    weighted = float(np.average(values[use], weights=sizes[use])) if use.any() else np.nan
+    return weighted, values, sizes
+
+
+def _interval(replicates: np.ndarray) -> tuple[float, float, int]:
+    finite = replicates[np.isfinite(replicates)]
+    if not finite.size:
+        return np.nan, np.nan, 0
+    lo, hi = np.quantile(finite, [0.025, 0.975])
+    return float(lo), float(hi), int(finite.size)
+
+
+def evaluate_pairs(
+    pairs: pd.DataFrame,
+    *,
+    group: str | None = None,
+    cluster: str | None = "gene_id",
+    n_boot: int = 1000,
+    seed: int = 0,
+    min_group: int = 2,
+    min_clusters: int = 5,
+) -> Evaluation:
+    """Measures sign AUROC, signed Spearman correlation, and sign accuracy on a ledger.
+
+    Metrics use pairs with pair_status "ok" and nonzero beta_alt. Every metric,
+    and every group, is evaluated on the same cluster bootstrap resamples, so
+    intervals do not depend on metric order. Intervals are 95% percentiles and
+    describe resampling of the supplied clusters only.
+
+    Args:
+        pairs: Ledger from join. Columns can be added first for stratified
+            analyses, for example bins of absolute predicted effect.
+        group: Ledger column for group-size-weighted metrics, or None to pool.
+        cluster: Ledger column defining bootstrap units. None resamples
+            individual pairs and can understate uncertainty for related pairs.
+        n_boot: Number of bootstrap resamples. Zero disables intervals.
+        seed: Random seed for bootstrapping.
+        min_group: Minimum pair count for a group to contribute to a weighted metric.
+        min_clusters: Minimum number of distinct clusters for an interval.
+
+    Returns:
+        The ledger, overall metrics with intervals and counts, per-group
+        estimates with intervals if group is set, and settings.
+
+    Raises:
+        ValueError: If ledger or cluster columns are missing.
+        KeyError: If the group column is missing.
+    """
+    usable = _usable(pairs)
+    if cluster is not None and cluster not in usable:
+        raise ValueError(f"cluster column {cluster!r} not in pairs")
+    d = usable["predicted"].to_numpy(float)
+    b = usable["beta_alt"].to_numpy(float)
+    clusters = usable[cluster].astype(str).to_numpy() if cluster else np.arange(len(usable))
+    n_clusters = len(np.unique(clusters))
+    labels, codes = _codes(usable[group]) if group else (np.empty(0), None)
+    n_groups = labels.size
+
+    estimates = {m: _estimate(f, d, b, codes, n_groups, min_group) for m, f in METRICS.items()}
+    run_boot = bool(len(d) and n_boot and n_clusters >= min_clusters)
+    reps = {m: np.full((n_boot if run_boot else 0, max(n_groups, 1) + 1), np.nan) for m in METRICS}
+    if run_boot:
+        sampler = _ClusterSampler(clusters, np.random.default_rng(seed))
+        for i in range(n_boot):
+            idx = sampler.draw()
+            sub = None if codes is None else codes[idx]
+            for m, f in METRICS.items():
+                weighted, values, _ = _estimate(f, d[idx], b[idx], sub, n_groups, min_group)
+                reps[m][i, 0] = weighted
+                reps[m][i, 1 : 1 + values.size] = values
+
+    rows, per_group = [], []
+    for m, (estimate, values, sizes) in estimates.items():
+        lo, hi, n_finite = _interval(reps[m][:, 0])
+        used = sizes[(sizes >= min_group) & np.isfinite(values)].sum() if group else len(d)
+        rows.append(
+            {
+                "metric": m,
+                "estimate": estimate,
+                "ci95_low": lo,
+                "ci95_high": hi,
+                "n_pairs": len(d),
+                "n_pairs_used": int(used),
+                "n_clusters": n_clusters,
+                "n_boot_finite": n_finite,
+                "weighting": f"by {group}" if group else "pooled",
+            }
+        )
+        for j, label in enumerate(labels):
+            g_lo, g_hi, _ = _interval(reps[m][:, 1 + j])
+            per_group.append(
+                {
+                    "group": label,
+                    "n": int(sizes[j]),
+                    "value": values[j],
+                    "metric": m,
+                    "ci95_low": g_lo,
+                    "ci95_high": g_hi,
+                }
+            )
+    settings = {
+        "group": group,
+        "cluster": cluster,
+        "n_boot": n_boot,
+        "seed": seed,
+        "min_group": min_group,
+        "min_clusters": min_clusters,
+        "n_ledger_rows": len(pairs),
+    }
+    columns = ["group", "n", "value", "metric", "ci95_low", "ci95_high"]
+    return Evaluation(pairs, pd.DataFrame(rows), pd.DataFrame(per_group, columns=columns), settings)
 
 
 def evaluate(
@@ -261,19 +383,16 @@ def evaluate(
     min_group: int = 2,
     min_clusters: int = 5,
 ) -> Evaluation:
-    """Measures sign AUROC, signed Spearman correlation, and sign accuracy.
+    """Joins predictions to observed effects and evaluates them.
 
-    Metrics use matched pairs with nonzero observed effects. Confidence
-    intervals are 95% percentiles over bootstrap replicates. They describe
-    resampling of the supplied clusters and do not model GTEx sampling.
+    Equivalent to evaluate_pairs(join(predictions, observed, ...), ...).
 
     Args:
         predictions: Prediction table accepted by join.
         observed: Observed-effects table accepted by join.
         match: Additional keys mapping observed columns to prediction columns.
         group: Observed column for group-size-weighted metrics, or None to pool.
-        cluster: Observed column defining bootstrap units. None resamples
-            individual pairs and can understate uncertainty for related pairs.
+        cluster: Observed column defining bootstrap units.
         effect: Prediction column containing the signed effect.
         forward_strand: Whether to require forward-strand REF agreement in join.
         n_boot: Number of bootstrap resamples. Zero disables intervals.
@@ -283,69 +402,118 @@ def evaluate(
 
     Returns:
         Pair ledger, metrics with confidence intervals and counts, per-group
-        estimates if requested, and evaluation settings. Intervals are NaN
-        when disabled or when there are too few clusters or no finite replicates.
+        estimates if requested, and evaluation settings.
 
     Raises:
         ValueError: If a required join or cluster column is missing.
         KeyError: If the requested group column is missing.
     """
     pairs = join(predictions, observed, match=match, effect=effect, forward_strand=forward_strand)
-    usable = pairs[(pairs["pair_status"] == "ok") & (pairs["beta_alt"] != 0)]
-    d = usable["predicted"].to_numpy(float)
-    b = usable["beta_alt"].to_numpy(float)
-    if cluster is not None and cluster not in usable:
-        raise ValueError(f"cluster column {cluster!r} not in observed")
-    clusters = usable[cluster].astype(str).to_numpy() if cluster else np.arange(len(usable))
-    groups = usable[group].astype(str).to_numpy() if group else None
-    rng = np.random.default_rng(seed)
-
-    rows, per_group = [], []
-    for name, metric in METRICS.items():
-        n_used = len(d)
-        if groups is None:
-            estimate = metric(d, b)
-        else:
-            estimate, table = by_group(metric, d, b, groups, min_group)
-            per_group.append(table.assign(metric=name))
-            n_used = int(table.loc[(table["n"] >= min_group) & table["value"].notna(), "n"].sum())
-        enough = len(np.unique(clusters)) >= min_clusters
-        boots = (
-            _bootstrap(metric, d, b, clusters, groups, n_boot, rng, min_group)
-            if len(d) and n_boot and enough
-            else np.array([np.nan])
-        )
-        finite = boots[np.isfinite(boots)]
-        lo, hi = np.quantile(finite, [0.025, 0.975]) if finite.size else (np.nan, np.nan)
-        rows.append(
-            {
-                "metric": name,
-                "estimate": estimate,
-                "ci95_low": float(lo),
-                "ci95_high": float(hi),
-                "n_pairs": len(d),
-                "n_pairs_used": n_used,
-                "n_clusters": len(np.unique(clusters)),
-                "n_boot_finite": int(finite.size),
-                "weighting": f"by {group}" if group else "pooled",
-            }
-        )
-    settings = {
+    result = evaluate_pairs(
+        pairs,
+        group=group,
+        cluster=cluster,
+        n_boot=n_boot,
+        seed=seed,
+        min_group=min_group,
+        min_clusters=min_clusters,
+    )
+    result.settings = {
         "match": dict(match or {}),
-        "group": group,
-        "cluster": cluster,
         "effect": effect,
         "forward_strand": forward_strand,
-        "n_boot": n_boot,
-        "seed": seed,
-        "min_group": min_group,
-        "min_clusters": min_clusters,
+        **result.settings,
         "n_observed": len(observed),
         "n_predictions": len(predictions),
     }
-    groups_table = (
-        pd.concat(per_group, ignore_index=True)
-        if per_group
-        else pd.DataFrame(columns=["group", "n", "value", "metric"])
-    )
-    return Evaluation(pairs, pd.DataFrame(rows), groups_table, settings)
+    return result
+
+
+def compare(
+    pairs_a: pd.DataFrame,
+    pairs_b: pd.DataFrame,
+    *,
+    group: str | None = None,
+    cluster: str | None = "gene_id",
+    n_boot: int = 1000,
+    seed: int = 0,
+    min_group: int = 2,
+    min_clusters: int = 5,
+) -> pd.DataFrame:
+    """Estimates metric differences between two prediction sets on the same observations.
+
+    Both ledgers must come from join with the same observed table, so row i
+    describes the same observed record in each. The comparison uses rows that
+    are usable in both ledgers, and a paired cluster bootstrap that applies
+    each resample to both prediction sets. This accounts for the dependence
+    that the McNemar test in ag2kit.stats ignores.
+
+    Args:
+        pairs_a: Ledger for the first prediction set.
+        pairs_b: Ledger for the second prediction set.
+        group: Ledger column for group-size-weighted metrics, or None to pool.
+        cluster: Ledger column defining bootstrap units.
+        n_boot: Number of bootstrap resamples. Zero disables intervals.
+        seed: Random seed for bootstrapping.
+        min_group: Minimum pair count for a group to contribute to a weighted metric.
+        min_clusters: Minimum number of distinct clusters for an interval.
+
+    Returns:
+        One row per metric with estimate_a, estimate_b, difference (a minus b),
+        its 95% percentile interval, and pair, cluster, and replicate counts.
+
+    Raises:
+        ValueError: If the ledgers are not row-aligned or lack required columns.
+    """
+    keys = ["chrom", "pos", "ref", "alt", "gene_id", "beta", *([group] if group else [])]
+    if cluster:
+        keys.append(cluster)
+    keys = list(dict.fromkeys(keys))
+    if len(pairs_a) != len(pairs_b) or not pairs_a[keys].reset_index(drop=True).equals(
+        pairs_b[keys].reset_index(drop=True)
+    ):
+        raise ValueError("pairs_a and pairs_b must be joined against the same observed table")
+    a = pairs_a.reset_index(drop=True)
+    b_ = pairs_b.reset_index(drop=True)
+    both = a.index.isin(_usable(a).index) & b_.index.isin(_usable(b_).index)
+    a, b_ = a[both], b_[both]
+    beta = a["beta_alt"].to_numpy(float)
+    da, db = a["predicted"].to_numpy(float), b_["predicted"].to_numpy(float)
+    clusters = a[cluster].astype(str).to_numpy() if cluster else np.arange(len(a))
+    n_clusters = len(np.unique(clusters))
+    labels, codes = _codes(a[group]) if group else (np.empty(0), None)
+
+    def diff(f: Metric, idx: np.ndarray | slice) -> tuple[float, float]:
+        sub = None if codes is None else codes[idx]
+        ea = _estimate(f, da[idx], beta[idx], sub, labels.size, min_group)[0]
+        eb = _estimate(f, db[idx], beta[idx], sub, labels.size, min_group)[0]
+        return ea, eb
+
+    run_boot = bool(len(beta) and n_boot and n_clusters >= min_clusters)
+    reps = {m: np.full(n_boot if run_boot else 0, np.nan) for m in METRICS}
+    if run_boot:
+        sampler = _ClusterSampler(clusters, np.random.default_rng(seed))
+        for i in range(n_boot):
+            idx = sampler.draw()
+            for m, f in METRICS.items():
+                ea, eb = diff(f, idx)
+                reps[m][i] = ea - eb
+    rows = []
+    for m, f in METRICS.items():
+        ea, eb = diff(f, slice(None))
+        lo, hi, n_finite = _interval(reps[m])
+        rows.append(
+            {
+                "metric": m,
+                "estimate_a": ea,
+                "estimate_b": eb,
+                "difference": ea - eb,
+                "ci95_low": lo,
+                "ci95_high": hi,
+                "n_pairs": len(beta),
+                "n_clusters": n_clusters,
+                "n_boot_finite": n_finite,
+                "weighting": f"by {group}" if group else "pooled",
+            }
+        )
+    return pd.DataFrame(rows)

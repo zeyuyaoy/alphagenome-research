@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+from ag2kit.client import AG2KitError
 from ag2kit.provenance import cache_dir, stable_hash, utc_now
 
 log = logging.getLogger("ag2kit")
@@ -48,6 +49,10 @@ COLUMNS = (
 )
 
 
+class SourceError(AG2KitError, RuntimeError):
+    """The GTEx Portal could not be reached or returned an unusable response."""
+
+
 def _dataset(dataset: str) -> str:
     if dataset not in GENCODE:
         raise ValueError(f"dataset must be one of {sorted(GENCODE)} (GRCh38 releases)")
@@ -66,7 +71,8 @@ def _get(path: str, params: dict, refresh: bool = False) -> dict:
         Decoded response body.
 
     Raises:
-        RuntimeError: If the HTTP request fails after the applicable retries.
+        SourceError: If the request fails after the applicable retries or
+            the response is not JSON.
     """
     cache = cache_dir() / "gtex" / f"{stable_hash({'path': path, **params})}.json"
     if not refresh:
@@ -81,7 +87,10 @@ def _get(path: str, params: dict, refresh: bool = False) -> dict:
             error: str = str(exc)
         else:
             if response.ok:
-                body = response.json()
+                try:
+                    body = response.json()
+                except ValueError as exc:
+                    raise SourceError(f"GTEx API {path} returned invalid JSON: {exc}") from exc
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 payload = {"url": response.url, "retrieved_utc": utc_now(), "response": body}
                 tmp = cache.with_suffix(".tmp")
@@ -92,7 +101,7 @@ def _get(path: str, params: dict, refresh: bool = False) -> dict:
             if 400 <= response.status_code < 500 and response.status_code != 429:
                 break
         time.sleep(2**attempt)
-    raise RuntimeError(f"GTEx API {path} {params} failed: {error}")
+    raise SourceError(f"GTEx API {path} {params} failed: {error}")
 
 
 def _pages(path: str, params: dict, refresh: bool) -> list[dict]:
@@ -123,7 +132,7 @@ def gencode_id(gene: str, dataset: str = "gtex_v10", refresh: bool = False) -> s
 
     Raises:
         ValueError: If the dataset is unsupported or the match is absent or ambiguous.
-        RuntimeError: If the Portal request fails.
+        SourceError: If the Portal request fails.
     """
     body = _get(
         "reference/gene",
@@ -152,7 +161,7 @@ def tissues(dataset: str = "gtex_v10", refresh: bool = False) -> pd.DataFrame:
 
     Raises:
         ValueError: If the dataset is unsupported.
-        RuntimeError: If the Portal request fails.
+        SourceError: If the Portal request fails.
     """
     body = _get("dataset/tissueSiteDetail", {"datasetId": _dataset(dataset)}, refresh)
     return pd.DataFrame(body.get("data", body if isinstance(body, list) else []))
@@ -209,7 +218,7 @@ def eqtls(
     Raises:
         ValueError: If the dataset is unsupported, a gene cannot be resolved
             uniquely, or returned variant IDs are invalid.
-        RuntimeError: If a Portal request fails.
+        SourceError: If a Portal request fails.
     """
     _dataset(dataset)
     frames = []
