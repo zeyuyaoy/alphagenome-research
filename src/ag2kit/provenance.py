@@ -172,10 +172,6 @@ def write_table(df: pd.DataFrame, path: str | Path, run_id: str) -> Path:
     return path
 
 
-# pandas 3 parses floats exactly by default and deprecates the option.
-_EXACT_FLOATS = {"float_precision": "round_trip"} if int(pd.__version__.split(".")[0]) < 3 else {}
-
-
 def read_table(path: str | Path) -> pd.DataFrame:
     """Reads a TSV with round-trip float precision.
 
@@ -189,7 +185,10 @@ def read_table(path: str | Path) -> pd.DataFrame:
     Raises:
         OSError: If the file cannot be read.
     """
-    return pd.read_csv(path, sep="\t", keep_default_na=True, na_values=[""], **_EXACT_FLOATS)
+    # pandas 3 parses floats exactly by default and deprecates the option.
+    if int(pd.__version__.split(".")[0]) < 3:
+        return pd.read_csv(path, sep="\t", float_precision="round_trip")
+    return pd.read_csv(path, sep="\t")
 
 
 @dataclass

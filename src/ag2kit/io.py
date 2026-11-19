@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_bool_dtype, is_integer_dtype, is_unsigned_integer_dtype
 
 OUTPUT_COLUMNS = (
     "variant_id",
@@ -54,8 +55,9 @@ def _chrom(chrom: object) -> str:
     return "chrM" if chrom == "chrMT" else chrom
 
 
-def _allele(allele: object) -> str:
-    return "" if pd.isna(allele) else str(allele).strip().upper()
+def _alleles(column: pd.Series) -> pd.Series:
+    normalized = column.map(lambda allele: str(allele).strip().upper(), na_action="ignore")
+    return normalized.astype(object).fillna("")
 
 
 def _builds(text: str) -> set[str]:
@@ -111,10 +113,15 @@ def _from_table(table: pd.DataFrame, assembly: str) -> tuple[pd.DataFrame, pd.Da
         raise ValueError(f"table has an assembly column that differs from assembly={assembly!r}")
     raw_pos = table[found["pos"]]
     pos = pd.to_numeric(raw_pos, errors="coerce")
-    bad = (pos.isna() | (pos < 1) | (pos % 1 != 0)).to_numpy()
+    bad = pos.isna() | (pos < 1)
+    if is_unsigned_integer_dtype(pos.dtype):
+        bad |= pos > np.uint64(2**63 - 1)
+    elif not (is_integer_dtype(pos.dtype) or is_bool_dtype(pos.dtype)):
+        # The largest int64 rounds up to 2**63 as a float.
+        bad |= (pos >= 2.0**63) | (pos != np.floor(pos))
     if bad.any():
-        i = int(np.argmax(bad))
-        raise ValueError(f"row {i}: pos {raw_pos.iloc[i]!r} is not a positive integer")
+        i = int(np.argmax(bad.to_numpy()))
+        raise ValueError(f"row {i}: pos {raw_pos.iloc[i]!r} is not a positive 64-bit integer")
     id_column = next((lower[a] for a in _ID_COLUMNS if a in lower), None)
     source_id = (
         table[id_column].map(lambda v: "" if pd.isna(v) or str(v) == "." else str(v))
@@ -220,8 +227,8 @@ def read_variants(
     out = pd.DataFrame(index=core.index)
     out["chrom"] = core["chrom"].map(_chrom).astype(object)
     out["pos"] = core["pos"].astype("int64")
-    out["ref"] = core["ref"].map(_allele).astype(object)
-    out["alt"] = core["alt"].map(_allele).astype(object)
+    out["ref"] = _alleles(core["ref"])
+    out["alt"] = _alleles(core["alt"])
     out["source_id"] = core["source_id"].astype(str).astype(object)
     out["assembly"] = pd.Series(assembly, index=core.index, dtype=object)
     out["record_index"] = core["record_index"].astype("int64")

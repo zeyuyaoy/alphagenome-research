@@ -180,11 +180,55 @@ def test_missing_columns_are_listed():
         read_variants(pd.DataFrame({"chr": ["1"], "ref": ["A"]}))
 
 
-@pytest.mark.parametrize("bad", [0, -5, 1.5, "abc", None])
-def test_bad_positions_raise_naming_the_row(bad):
-    table = pd.DataFrame({"chrom": ["1", "1"], "pos": [10, bad], "ref": ["A", "A"], "alt": "C"})
+@pytest.mark.parametrize(
+    "bad,dtype",
+    [
+        (0, None),
+        (-5, None),
+        (1.5, None),
+        ("abc", None),
+        (None, None),
+        (2**63, None),
+        (str(2**63), None),
+        (float(2**63), None),
+        (1e30, None),
+        (None, "int64[pyarrow]"),
+        (2**63, "uint64[pyarrow]"),
+        (1.5, "double[pyarrow]"),
+        (float(2**63), "double[pyarrow]"),
+    ],
+)
+def test_bad_positions_raise_naming_the_row(bad, dtype):
+    table = pd.DataFrame(
+        {"chrom": "1", "pos": pd.Series([10, bad], dtype=dtype), "ref": "A", "alt": "C"}
+    )
     with pytest.raises(ValueError, match="row 1"):
         read_variants(table)
+
+
+@pytest.mark.parametrize(
+    "pos,dtype",
+    [
+        (2**63 - 1, "int64"),
+        (2**63 - 1, "int64[pyarrow]"),
+        (2**63 - 1, "uint64[pyarrow]"),
+        (float(2**63 - 1024), "double[pyarrow]"),
+    ],
+)
+def test_large_valid_position_preserves_value(pos, dtype):
+    table = pd.DataFrame(
+        {"chrom": "1", "pos": pd.Series([pos], dtype=dtype), "ref": "A", "alt": "G"}
+    )
+    assert read_variants(table)["pos"].item() == pos
+
+
+def test_categorical_alleles_preserve_missing_values_and_normalize_text():
+    table = pd.DataFrame(
+        {"chrom": "1", "pos": [1, 2], "ref": pd.Categorical([" a ", None]), "alt": "G"}
+    )
+    result = read_variants(table)
+    assert result["ref"].tolist() == ["A", ""]
+    assert result["input_status"].tolist() == ["ok", "missing_allele"]
 
 
 def test_parquet_round_trip_preserves_output(tmp_path):
