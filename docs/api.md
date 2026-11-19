@@ -170,7 +170,7 @@ The `metrics` table includes `estimate`, `ci95_low`, `ci95_high`, `n_pairs`, `n_
 
 | Function or type                                                            | Description                                                                                                    |
 |-----------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
-| `sign_auroc`, `spearman`, `sign_accuracy`                                   | Evaluation metrics defined in [Methods](methods.md#metrics).                                                   |
+| `sign_auroc`, `spearman`, `sign_accuracy`                                   | Evaluation metrics defined in [Methods](methods.md#evaluation-metrics).                                        |
 | `by_group(metric, deltas, betas, groups, min_size=2)`                       | Pair-count-weighted mean of a metric across groups.                                                            |
 | `recall_at_sign_accuracy(deltas, betas, accuracy=0.9)`                      | Fraction of pairs in the largest top-*k* set by absolute predicted effect that meets the target sign accuracy. |
 | `concordance`, `classify`, `no_call_threshold`                              | Sign concordance and exact binomial testing; classification and null-derived no-call threshold.                |
@@ -201,7 +201,9 @@ The manifest records the Git state and versions of Python, `ag2kit`, `alphagenom
 
 #### Reproducibility
 
-Requests with the same identity reuse cached predictions. Each cache entry stores its `requested_utc` timestamp. See [Request identity and caching](methods.md#request-identity-and-caching).
+Requests with the same identity reuse cached predictions. Each cache entry stores its `requested_utc` timestamp. See [Prediction requests and caching](methods.md#prediction-requests-and-caching).
+
+Cell-conditioned requests use separate, ordered lists of cell and gene names in the cache fingerprint. Entries created with the earlier fingerprint require rescoring.
 
 The AlphaGenome API does not expose a model revision or guarantee identical results across calls. Results may change after cache deletion or a server-side model update. For reproducible analyses:
 

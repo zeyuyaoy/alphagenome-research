@@ -1,4 +1,4 @@
-### """ag2kit: reproducible variant-effect analysis with the AlphaGenome SDK
+### ag2kit: reproducible variant-effect analysis with the AlphaGenome SDK
 
 AlphaGenome predicts how non-coding DNA variants affect gene regulation [1]. AlphaGenome 2 also supports predictions conditioned on a reference cell type, tissue, or single-cell dataset [4]. Its SDK handles individual predictions and batch scoring. Evaluating those predictions against observed effects requires additional steps, including input validation, allele matching, error handling, and uncertainty estimation that accounts for linkage disequilibrium.
 
@@ -81,7 +81,7 @@ evaluation.summary()
 evaluation.save("results/")
 ```
 
-The `tracks={"imputation_mode": "observed"}` option limits gene-effect calculations to tracks observed during training; see [Methods](docs/methods.md#gene-level-effect).
+The `tracks={"imputation_mode": "observed"}` option limits gene-effect calculations to tracks observed during training. See [Gene-level effect estimation](docs/methods.md#gene-level-effect-estimation).
 
 For a command-line workflow, use [`examples/gtex_eqtl_eval.py`](examples/gtex_eqtl_eval.py). It also generates a scatter plot with `matplotlib`, which must be installed separately. 
 
@@ -138,7 +138,7 @@ To find valid reference conditions, call `supported_conditions()`. For finer con
 - `RNA_SEQ` predicts log fold changes, while GTEx reports slopes for normalised expression. Accordingly, `ag2kit` compares the direction and rank of effects.
 - GTEx significant-pairs files contain selected eQTL associations, and many variants linked to the same gene are in linkage disequilibrium. As a result, sign metrics may be higher than those measured across all tested pairs. By default, bootstrap intervals resample whole genes to account for within-gene dependence.
 - Sign agreement describes performance at the tested loci. It does not establish causality or resolve individual variant effects. In addition, the p-values from `concordance`, `spearman`, and `mcnemar` assume independent pairs, so `evaluate` leaves them out.
-- All coordinates are GRCh38 and 1-based; the package performs no liftover. The API does not expose a model revision, so reproducible reruns depend on cached results ([Reproducibility](docs/api.md#reproducibility)). Tests cover the implementation, but the package has not reproduced a published AlphaGenome benchmark. See [Validation](docs/methods.md#validation) and [Methods](docs/methods.md#limitations) for details.
+- All coordinates are GRCh38 and 1-based. The package performs no liftover. The API does not expose a model revision, so reproducible reruns depend on cached results ([Reproducibility](docs/api.md#reproducibility)). Tests cover the implementation, but the package has not reproduced a published AlphaGenome benchmark. See [Implementation validation](docs/methods.md#implementation-validation) and [Scope and limitations](docs/methods.md#scope-and-limitations).
 - Finally, AlphaGenome outputs are subject to the SDK's usage restrictions: non-commercial research only, with no use for training other machine-learning models or making clinical decisions. The AlphaGenome terms also govern cached and shared outputs. When using GTEx data, acknowledge the GTEx Project [2].
 
 #### Documentation
