@@ -411,7 +411,7 @@ class AG2Client:
             meta = json.loads((table.schema.metadata or {})[b"ag2kit"])
         except (OSError, KeyError, ValueError, pa.ArrowException):
             return None
-        if meta.get("cache_key") != key:
+        if meta.get("cache_key") != key or table.num_rows == 0:
             return None
         return table.to_pandas(), meta
 
@@ -579,11 +579,15 @@ class AG2Client:
         else:
             kwargs["condition"] = spec.condition
         outputs = self.model.score_variant(**kwargs)
+        if not outputs:
+            raise ValueError("AlphaGenome returned no scores")
         tidy = variant_scorers.tidy_anndata(
             outputs[0], match_gene_strand=False, include_extended_metadata=True
         )
+        if tidy.empty:
+            raise ValueError("AlphaGenome returned no scores")
         # Parquet cannot encode SDK Variant and Interval objects directly.
-        for col in tidy.select_dtypes(include="object").columns:
+        for col in tidy.columns[tidy.dtypes == np.dtype("object")]:
             tidy[col] = tidy[col].map(lambda v: v if v is None or isinstance(v, str) else str(v))
         return tidy
 
@@ -690,9 +694,6 @@ class AG2Client:
         for key, pair, problem in zip(keys, pairs, problems, strict=True):
             if not problem:
                 first.setdefault(key, pair)
-        live = first and not self.dry_run and self.model is None
-        if live and sdk_available() and api_key_available():
-            self.connect()
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             done = dict(
                 zip(first, pool.map(lambda p: self._obtain(*p), first.values()), strict=True)
@@ -752,7 +753,8 @@ class AG2Client:
             return pd.DataFrame(columns=["row", "status", "error", "error_type"])
         n_cells = int(getattr(conditioning, "n_obs", 0) or 0)
         pairs: list[tuple[int, RequestSpec | None, str]] = []
-        for i, row in enumerate(variants.to_dict("records")):
+        input_rows = variants.to_dict("records")
+        for i, row in enumerate(input_rows):
             problem = str(row.get("input_status", "ok") or "ok")
             problem = "" if problem == "ok" else f"input_status={problem}"
             assembly = str(row.get("assembly", "GRCh38") or "GRCh38")
@@ -784,7 +786,7 @@ class AG2Client:
         records: list[dict] = []
         for i, spec, problem in pairs:
             if spec is None:
-                row = variants.iloc[i]
+                row = input_rows[i]
                 records.append(
                     {
                         "row": i,
@@ -914,8 +916,8 @@ def conditioning_fingerprint(conditioning: Any) -> str:
     x = np.ascontiguousarray(x.toarray() if sp.issparse(x) else np.asarray(x))
     h.update(f"{x.dtype}{x.shape}".encode())
     h.update(x.tobytes())
-    for names in (conditioning.obs_names, conditioning.var_names):
-        h.update("\x1f".join(map(str, names)).encode())
+    names = [list(map(str, names)) for names in (conditioning.obs_names, conditioning.var_names)]
+    h.update(json.dumps(names).encode())
     return h.hexdigest()
 
 

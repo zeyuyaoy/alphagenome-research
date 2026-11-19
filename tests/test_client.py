@@ -197,6 +197,27 @@ def test_custom_models_never_share_cache_with_the_api(tmp_path):
     assert api.cached(spec()) is None
 
 
+def test_conditioning_fingerprint_distinguishes_cell_and_gene_names():
+    a, b = cells(n=1), cells(n=1)
+    a.obs_names, a.var_names = ["cell"], ["AGENEA", "GENEB", "GENEC"]
+    b.obs_names, b.var_names = ["cellA"], ["GENEA", "GENEB", "GENEC"]
+    assert ag2.conditioning_fingerprint(a) != ag2.conditioning_fingerprint(b)
+
+
+def test_batch_records_connection_failure(tmp_path, monkeypatch):
+    from alphagenome.models.v2 import dna_client
+
+    def unavailable(*args, **kwargs):
+        raise ConnectionError("server unavailable")
+
+    monkeypatch.setenv(ag2.API_KEY_ENV, "test-key")
+    monkeypatch.setattr(dna_client, "create", unavailable)
+    client = ag2.AG2Client(dry_run=False, cache_dir=tmp_path, max_retries=1)
+    records = client.score_many([spec(), spec(alt="G")])
+    assert [r["status"] for r in records] == ["failed", "failed"]
+    assert [r["error_type"] for r in records] == ["network", "network"]
+
+
 def test_condition_path_builds_a_1_based_variant_and_reduces_on_strand(tmp_path):
     model = FakeModel()
     client = live(tmp_path, model)
@@ -494,6 +515,21 @@ def test_score_variants_edge_cases(tmp_path):
     out = client.score_variants(bad, condition="UBERON:0013756", gene_column="gene_id")
     assert out.loc[0, "status"] == "failed" and out.loc[0, "chrom"] == "chr21"
     assert out.loc[0, "gene_id"] == "G"
+
+
+def test_empty_sdk_scores_preserve_input_row(tmp_path):
+    import anndata as ad
+
+    class EmptyModel:
+        def score_variant(self, **kw):
+            return [ad.AnnData(X=np.empty((0, 1)))]
+
+    client = live(tmp_path, EmptyModel())
+    variants = pd.DataFrame({"chrom": ["21"], "pos": [41422154], "ref": ["T"], "alt": ["C"]})
+    out = client.score_variants(variants, condition="UBERON:0013756")
+    assert out["row"].tolist() == [0]
+    assert out["status"].tolist() == ["failed"]
+    assert "no scores" in out.loc[0, "error"]
 
 
 class BloodModel(FakeModel):
