@@ -284,7 +284,7 @@ def by_group(metric, deltas, betas, groups, min_size: int = 2) -> tuple[float, p
     """
     df = pd.DataFrame({"delta": deltas, "beta": betas, "group": groups})
     rows = []
-    for name, g in df.groupby("group", sort=True):
+    for name, g in df.groupby("group", sort=True, observed=False):
         value = float(metric(g["delta"].to_numpy(), g["beta"].to_numpy()))
         rows.append({"group": name, "n": len(g), "value": value})
     table = pd.DataFrame(rows, columns=["group", "n", "value"])

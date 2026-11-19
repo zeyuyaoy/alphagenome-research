@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from ag2kit.provenance import software_versions, utc_now
-from ag2kit.stats import by_group, sign_auroc, spearman
+from ag2kit.stats import _pairs, by_group, sign_auroc, spearman
 from ag2kit.variants import harmonize_effect
 
 Metric = Callable[[np.ndarray, np.ndarray], float]
@@ -32,10 +32,12 @@ def sign_accuracy(deltas, betas) -> float:
     Returns:
         Sign accuracy after excluding non-finite pairs and zero betas,
         or NaN if no pairs remain. Zero predictions count as incorrect.
+
+    Raises:
+        ValueError: If the inputs have different shapes.
     """
-    d = np.asarray(deltas, dtype=float)
-    b = np.asarray(betas, dtype=float)
-    ok = np.isfinite(d) & np.isfinite(b) & (b != 0)
+    d, b = _pairs(deltas, betas)
+    ok = b != 0
     if not ok.any():
         return float("nan")
     return float(np.mean(np.sign(d[ok]) == np.sign(b[ok])))
@@ -54,14 +56,14 @@ METRICS: dict[str, Metric] = {
 
 def _key(df: pd.DataFrame) -> pd.DataFrame:
     """Builds an order-independent allele key using unversioned gene IDs."""
-    ref = df["ref"].astype(str).str.upper()
-    alt = df["alt"].astype(str).str.upper()
+    ref = df["ref"].astype("string").str.upper()
+    alt = df["alt"].astype("string").str.upper()
     return pd.DataFrame(
         {
-            "_chrom": "chr" + df["chrom"].astype(str).str.removeprefix("chr"),
+            "_chrom": "chr" + df["chrom"].astype("string").str.removeprefix("chr"),
             "_pos": pd.to_numeric(df["pos"], errors="coerce").astype("Int64"),
-            "_alleles": np.where(ref < alt, ref + "/" + alt, alt + "/" + ref),
-            "_gene": df["gene_id"].astype(str).str.split(".").str[0],
+            "_alleles": (ref + "/" + alt).where(ref < alt, alt + "/" + ref),
+            "_gene": df["gene_id"].astype("string").str.split(".").str[0],
         },
         index=df.index,
     )
@@ -127,7 +129,7 @@ def join(
     """Matches observed effects to predictions and orients them to predicted ALT.
 
     Matching uses chromosome, position, unordered REF/ALT, and unversioned
-    gene ID. Equivalent prediction rows with the same score and status
+    gene ID. Equivalent predictions with the same REF, score, and status
     count as one candidate.
 
     Args:
@@ -158,27 +160,29 @@ def join(
             raise ValueError(f"{name} is missing columns {sorted(missing)}")
 
     obs = observed.reset_index(drop=True)
-    pred = predictions[predictions["chrom"].notna()].reset_index(drop=True)
+    pred = predictions.reset_index(drop=True)
     keys = ["_chrom", "_pos", "_alleles", "_gene"]
-    o = pd.concat([_key(obs), obs[list(match)].rename(columns=lambda c: f"_m_{c}")], axis=1)
+    match_keys = [f"_m_{c}" for c in match]
+    o = pd.concat([_key(obs), obs[list(match)].set_axis(match_keys, axis=1)], axis=1)
     p = pd.concat(
         [
             _key(pred),
-            pred[list(match.values())].rename(columns={v: f"_m_{k}" for k, v in match.items()}),
+            pred[list(match.values())].set_axis(match_keys, axis=1),
         ],
         axis=1,
     )
-    keys += [f"_m_{c}" for c in match]
+    keys += match_keys
+    variant_keys = [k for k in keys if k != "_gene"]
+    p["_ref"] = pred["ref"].astype("string").str.upper()
     p["_effect"] = pred[effect].to_numpy()
     p["_status"] = pred["status"].to_numpy()
-    p = p.drop_duplicates([*keys, "_effect", "_status"])
+    p = p.dropna(subset=variant_keys).drop_duplicates([*keys, "_ref", "_effect", "_status"])
     p["_n_pred"] = p.groupby(keys, dropna=False)["_gene"].transform("size")
     p = p.drop_duplicates(keys)
     p["_pred_row"] = p.index
-    merged = o.merge(p[[*keys, "_n_pred", "_pred_row"]], on=keys, how="left")
+    merged = o.merge(p.dropna(subset=keys)[[*keys, "_n_pred", "_pred_row"]], on=keys, how="left")
     # Without gene_column, a request failure applies to every gene for that variant.
-    variant_keys = [k for k in keys if k != "_gene"]
-    failed = p[(p["_status"] != "completed") & p["_gene"].isin(["", "nan", "None"])]
+    failed = p[(p["_status"] != "completed") & p["_gene"].fillna("").isin(["", "nan", "None"])]
     failed_variants = set(map(tuple, failed[variant_keys].astype(str).to_numpy()))
     merged["_variant_failed"] = [
         tuple(r) in failed_variants for r in merged[variant_keys].astype(str).to_numpy()
@@ -189,17 +193,18 @@ def join(
     matched = pred.reindex(merged["_pred_row"].fillna(-1).astype(int))[pred_cols]
     matched.index = obs.index
     out = obs.join(matched.add_prefix("pred_"))
-    out["predicted"] = out[f"pred_{effect}"].astype(float)
+    score = out[f"pred_{effect}"]
+    out["predicted"] = score.where(score.notna(), np.nan).astype(float)
 
     status, beta_alt, flipped = [], [], []
-    for i, row in out.iterrows():
-        n = merged.at[i, "_n_pred"]
-        if pd.isna(n):
+    counts = merged["_n_pred"].fillna(0).to_numpy(dtype=int)
+    for (i, row), n in zip(out.iterrows(), counts, strict=True):
+        if n == 0:
             gone = "prediction_failed" if merged.at[i, "_variant_failed"] else "no_prediction"
             s, b, f = gone, np.nan, False
         elif n > 1:
             s, b, f = "ambiguous_prediction", np.nan, False
-        elif row["pred_status"] != "completed" or not np.isfinite(row["predicted"]):
+        elif str(row["pred_status"]) != "completed" or not np.isfinite(row["predicted"]):
             s, b, f = "prediction_failed", np.nan, False
         elif forward_strand and str(row["ref"]).upper() != str(row["pred_ref"]).upper():
             # Swapping genomic REF and ALT changes the model input, so negation

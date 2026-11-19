@@ -144,6 +144,39 @@ def test_match_columns_keep_tissues_apart():
     assert pairs["predicted"].tolist() == [-0.5, 0.5]
 
 
+def test_multiple_observed_keys_can_match_one_prediction_column():
+    p = preds([("chr1", 100, "A", "G", "G1", 0.5, "completed")])
+    p["condition"] = "blood"
+    o = obs([("chr1", 100, "A", "G", "G1", 1.0, "G")] * 2)
+    o["tissue"] = "blood"
+    o["mapped_tissue"] = ["blood", "lung"]
+    from ag2kit.evaluate import join
+
+    pairs = join(p, o, match={"tissue": "condition", "mapped_tissue": "condition"})
+    assert pairs["pair_status"].tolist() == ["ok", "no_prediction"]
+
+
+@pytest.mark.parametrize("column", ["chrom", "pos", "ref", "alt", "gene_id", "condition"])
+def test_missing_join_keys_do_not_match(column):
+    p = preds([("chr1", 100, "A", "G", "G1", 0.5, "completed")])
+    o = obs([("chr1", 100, "A", "G", "G1", 1.0, "G")])
+    p[column] = o[column] = pd.NA
+    from ag2kit.evaluate import join
+
+    pairs = join(p, o, match={"condition": "condition"} if column == "condition" else None)
+    assert pairs["pair_status"].tolist() == ["no_prediction"]
+
+
+@pytest.mark.parametrize("column", ["status", "raw_effect"])
+def test_missing_prediction_values_are_failed(column):
+    p = preds([("chr1", 100, "A", "G", "G1", 0.5, "completed")])
+    o = obs([("chr1", 100, "A", "G", "G1", 1.0, "G")])
+    p[column] = pd.NA
+    from ag2kit.evaluate import join
+
+    assert join(p, o)["pair_status"].tolist() == ["prediction_failed"]
+
+
 def synthetic(n_genes=30, per_gene=4, seed=1):
     rng = np.random.default_rng(seed)
     rows_p, rows_o = [], []
@@ -173,12 +206,26 @@ def test_metrics_match_independent_reference_implementations():
     assert m["sign_accuracy"] == pytest.approx(np.mean(np.sign(d) == np.sign(b)))
 
 
+def test_sign_accuracy_rejects_unaligned_pairs():
+    with pytest.raises(ValueError, match="same length"):
+        ag2kit.sign_accuracy([1.0], [1.0, -1.0])
+
+
 def test_grouped_metrics_are_size_weighted():
     p, o = synthetic()
     ev = ag2kit.evaluate(p, o, group="tissue", n_boot=0)
     t = ev.per_group[ev.per_group["metric"] == "sign_auroc"].set_index("group")
     expected = np.average(t["value"], weights=t["n"])
     assert ev.metrics.set_index("metric").loc["sign_auroc", "estimate"] == pytest.approx(expected)
+
+
+def test_group_weighting_retains_empty_categorical_groups():
+    groups = pd.Categorical(["blood", "blood"], categories=["blood", "lung"])
+    estimate, table = ag2kit.by_group(ag2kit.sign_accuracy, [0.5, -0.5], [1.0, -1.0], groups)
+    assert estimate == 1.0
+    assert table["group"].tolist() == ["blood", "lung"]
+    assert table["n"].tolist() == [2, 0]
+    assert np.isnan(table["value"].iloc[1])
 
 
 def test_cluster_bootstrap_is_reproducible_and_wider_than_pair_bootstrap():
@@ -205,6 +252,17 @@ def test_zero_effects_and_zero_predictions():
     assert m.loc["sign_accuracy", "estimate"] == 0.5
 
 
+def test_nonfinite_observed_effects_do_not_weight_groups_or_count_as_pairs():
+    p = preds([("chr1", i, "A", "G", f"G{i}", 0.5, "completed") for i in range(1, 4)])
+    o = obs([("chr1", i, "A", "G", f"G{i}", b, "G") for i, b in enumerate([1.0, -1.0, np.inf], 1)])
+    o["tissue"] = ["blood", "lung", "blood"]
+    ev = ag2kit.evaluate(p, o, group="tissue", min_group=1, n_boot=0)
+    acc = ev.metrics.set_index("metric").loc["sign_accuracy"]
+    assert ev.pairs["pair_status"].tolist() == ["ok", "ok", "missing_statistics"]
+    assert acc["estimate"] == 0.5
+    assert acc["n_pairs"] == acc["n_pairs_used"] == acc["n_clusters"] == 2
+
+
 def test_save_round_trip(tmp_path):
     p, o = synthetic(n_genes=5)
     ev = ag2kit.evaluate(p, o, n_boot=10)
@@ -226,6 +284,20 @@ def test_identical_duplicate_predictions_are_not_ambiguous():
     from ag2kit.evaluate import join
 
     assert join(p, obs([("chr1", 100, "A", "G", "G1", 1.0, "G")]))["pair_status"][0] == "ok"
+
+
+def test_predictions_with_swapped_reference_are_distinct_even_if_scores_match():
+    p = preds(
+        [
+            ("chr1", 100, "A", "G", "G1", 0.5, "completed"),
+            ("chr1", 100, "G", "A", "G1", 0.5, "completed"),
+        ]
+    )
+    o = obs([("chr1", 100, "A", "G", "G1", 1.0, "G")])
+    from ag2kit.evaluate import join
+
+    assert join(p, o)["pair_status"].tolist() == ["ambiguous_prediction"]
+    assert join(p.iloc[::-1], o)["pair_status"].tolist() == ["ambiguous_prediction"]
 
 
 def test_failed_variant_level_predictions_are_prediction_failed():
