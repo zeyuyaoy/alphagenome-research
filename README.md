@@ -1,4 +1,4 @@
-### ag2kit: reproducible variant-effect analysis with the AlphaGenome SDK
+### ag2kit: Reproducible AlphaGenome 2 variant-effect analysis
 
 AlphaGenome predicts how non-coding DNA variants affect gene regulation [1]. AlphaGenome 2 also supports predictions conditioned on a reference cell type, tissue, or single-cell dataset [4]. Its SDK handles individual predictions and batch scoring. Evaluating those predictions against observed effects requires additional steps, including input validation, allele matching, error handling, and uncertainty estimation that accounts for linkage disequilibrium.
 
