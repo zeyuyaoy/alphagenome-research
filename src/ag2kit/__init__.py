@@ -27,7 +27,13 @@ from ag2kit.stats import (
     sign_auroc,
     spearman,
 )
-from ag2kit.variants import ReferenceBase, annotate_folds, cluster_loci, harmonize_effect
+from ag2kit.variants import (
+    ReferenceBase,
+    annotate_folds,
+    cluster_loci,
+    harmonize_effect,
+    locus_clusters,
+)
 
 try:
     __version__ = version("ag2kit")
@@ -58,6 +64,7 @@ __all__ = [
     "harmonize_effect",
     "interaction",
     "join",
+    "locus_clusters",
     "no_call_threshold",
     "read_table",
     "read_variants",

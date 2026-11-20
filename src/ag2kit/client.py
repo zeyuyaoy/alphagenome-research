@@ -11,7 +11,6 @@ import os
 import random
 import re
 import threading
-import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, fields, replace
@@ -318,6 +317,7 @@ class AG2Client:
         self._custom_model = self.model is not None
         self._connect_lock = threading.Lock()
         self._scorers: dict[tuple[str, bool], tuple[str, str]] = {}
+        self._stop = threading.Event()
 
     def connect(self) -> None:
         """Initializes the live client if needed.
@@ -609,7 +609,8 @@ class AG2Client:
                     delay,
                     attempt,
                 )
-                time.sleep(delay)
+                if self._stop.wait(delay):
+                    break
                 continue
             meta = {
                 **self._identity(spec, req.fingerprint),
@@ -773,6 +774,7 @@ class AG2Client:
             return [(i, finish(reqs[i], out)) for i in members]
 
         pool = ThreadPoolExecutor(max_workers=max_workers)
+        self._stop.clear()
         try:
             futures = [pool.submit(work, members) for members in shared.values()]
             for n, future in enumerate(as_completed(futures), start=1):
@@ -780,6 +782,9 @@ class AG2Client:
                     results[i] = value
                 if n % PROGRESS_EVERY == 0 or n == len(futures):
                     log.info("finished %d of %d requests", n, len(futures))
+        except BaseException:
+            self._stop.set()
+            raise
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
         return results

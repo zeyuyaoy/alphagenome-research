@@ -168,6 +168,7 @@ def join(
     ]
 
     pred_cols = ["ref", "alt", effect, "status", "error", "source", "condition", "scorer_name"]
+    pred_cols += ["model_version", "track_filter", "n_reduced_values"]
     pred_cols = [c for c in pred_cols if c in pred.columns]
     matched = pred.reindex(merged["_pred_row"].fillna(-1).astype(int))[pred_cols]
     matched.index = obs.index
@@ -248,16 +249,21 @@ def _estimate(
     codes: np.ndarray | None,
     n_groups: int,
     min_group: int,
+    fixed: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
-    """Returns the pooled or group-size-weighted estimate, group values, and group sizes."""
+    """Returns the pooled or group-size-weighted estimate, group values, and group sizes.
+
+    With fixed, the average uses exactly those groups and is NaN if any is undefined.
+    """
     if codes is None:
         return float(metric(d, b)), np.empty(0), np.empty(0, dtype=int)
     sizes = np.bincount(codes, minlength=n_groups)
     members = np.split(np.argsort(codes, kind="stable"), np.cumsum(sizes)[:-1])
     values = np.array([float(metric(d[m], b[m])) if m.size else np.nan for m in members])
-    use = (sizes >= min_group) & np.isfinite(values)
-    weighted = float(np.average(values[use], weights=sizes[use])) if use.any() else np.nan
-    return weighted, values, sizes
+    use = (sizes >= min_group) & np.isfinite(values) if fixed is None else fixed
+    if not use.any() or not np.isfinite(values[use]).all():
+        return np.nan, values, sizes
+    return float(np.average(values[use], weights=sizes[use])), values, sizes
 
 
 def _interval(replicates: np.ndarray) -> tuple[float, float, int]:
@@ -276,7 +282,7 @@ def evaluate_pairs(
     n_boot: int = 1000,
     seed: int = 0,
     min_group: int = 2,
-    min_clusters: int = 5,
+    min_clusters: int = 20,
 ) -> Evaluation:
     """Measures sign AUROC, signed Spearman correlation, and sign accuracy on a ledger.
 
@@ -315,6 +321,12 @@ def evaluate_pairs(
     n_groups = labels.size
 
     estimates = {m: _estimate(f, d, b, codes, n_groups, min_group) for m, f in METRICS.items()}
+    fixed = {m: (e[2] >= min_group) & np.isfinite(e[1]) for m, e in estimates.items()}
+    group_clusters = (
+        np.array([len(np.unique(clusters[codes == j])) for j in range(n_groups)])
+        if codes is not None
+        else np.empty(0, dtype=int)
+    )
     run_boot = bool(len(d) and n_boot and n_clusters >= min_clusters)
     reps = {m: np.full((n_boot if run_boot else 0, max(n_groups, 1) + 1), np.nan) for m in METRICS}
     if run_boot:
@@ -323,7 +335,9 @@ def evaluate_pairs(
             idx = sampler.draw()
             sub = None if codes is None else codes[idx]
             for m, f in METRICS.items():
-                weighted, values, _ = _estimate(f, d[idx], b[idx], sub, n_groups, min_group)
+                weighted, values, _ = _estimate(
+                    f, d[idx], b[idx], sub, n_groups, min_group, fixed[m] if group else None
+                )
                 reps[m][i, 0] = weighted
                 reps[m][i, 1 : 1 + values.size] = values
 
@@ -345,7 +359,9 @@ def evaluate_pairs(
             }
         )
         for j, label in enumerate(labels):
-            g_lo, g_hi, _ = _interval(reps[m][:, 1 + j])
+            g_lo, g_hi, g_finite = _interval(reps[m][:, 1 + j])
+            if group_clusters[j] < min_clusters:
+                g_lo, g_hi, g_finite = np.nan, np.nan, 0
             per_group.append(
                 {
                     "group": label,
@@ -354,6 +370,8 @@ def evaluate_pairs(
                     "metric": m,
                     "ci95_low": g_lo,
                     "ci95_high": g_hi,
+                    "n_clusters": int(group_clusters[j]),
+                    "n_boot_finite": g_finite,
                 }
             )
     settings = {
@@ -365,7 +383,8 @@ def evaluate_pairs(
         "min_clusters": min_clusters,
         "n_ledger_rows": len(pairs),
     }
-    columns = ["group", "n", "value", "metric", "ci95_low", "ci95_high"]
+    columns = ["group", "n", "value", "metric", "ci95_low", "ci95_high", "n_clusters"]
+    columns.append("n_boot_finite")
     return Evaluation(pairs, pd.DataFrame(rows), pd.DataFrame(per_group, columns=columns), settings)
 
 
@@ -381,7 +400,7 @@ def evaluate(
     n_boot: int = 1000,
     seed: int = 0,
     min_group: int = 2,
-    min_clusters: int = 5,
+    min_clusters: int = 20,
 ) -> Evaluation:
     """Joins predictions to observed effects and evaluates them.
 
@@ -438,13 +457,14 @@ def compare(
     n_boot: int = 1000,
     seed: int = 0,
     min_group: int = 2,
-    min_clusters: int = 5,
+    min_clusters: int = 20,
 ) -> pd.DataFrame:
     """Estimates metric differences between two prediction sets on the same observations.
 
     Both ledgers must come from join with the same observed table, so row i
     describes the same observed record in each. The comparison uses rows that
-    are usable in both ledgers, and a paired cluster bootstrap that applies
+    are usable in both ledgers, each oriented to its own predicted ALT, and a
+    paired cluster bootstrap that applies
     each resample to both prediction sets. This accounts for the dependence
     that the McNemar test in ag2kit.stats ignores.
 
@@ -460,47 +480,61 @@ def compare(
 
     Returns:
         One row per metric with estimate_a, estimate_b, difference (a minus b),
-        its 95% percentile interval, and pair, cluster, and replicate counts.
+        its 95% percentile interval, the number of common pairs, pairs usable
+        in only one ledger, and cluster and replicate counts.
 
     Raises:
         ValueError: If the ledgers are not row-aligned or lack required columns.
     """
-    keys = ["chrom", "pos", "ref", "alt", "gene_id", "beta", *([group] if group else [])]
-    if cluster:
-        keys.append(cluster)
-    keys = list(dict.fromkeys(keys))
-    if len(pairs_a) != len(pairs_b) or not pairs_a[keys].reset_index(drop=True).equals(
-        pairs_b[keys].reset_index(drop=True)
-    ):
+    keys = ["chrom", "pos", "ref", "alt", "gene_id", "beta", "effect_allele"]
+    keys = list(dict.fromkeys([*keys, *(c for c in (group, cluster) if c)]))
+    for name, ledger in (("pairs_a", pairs_a), ("pairs_b", pairs_b)):
+        if missing := set(keys) - set(ledger.columns):
+            raise ValueError(f"{name} is missing columns {sorted(missing)}")
+    left = pairs_a[keys].reset_index(drop=True).astype(str)
+    right = pairs_b[keys].reset_index(drop=True).astype(str)
+    if len(pairs_a) != len(pairs_b) or not left.equals(right):
         raise ValueError("pairs_a and pairs_b must be joined against the same observed table")
     a = pairs_a.reset_index(drop=True)
     b_ = pairs_b.reset_index(drop=True)
-    both = a.index.isin(_usable(a).index) & b_.index.isin(_usable(b_).index)
+    ok_a, ok_b = a.index.isin(_usable(a).index), b_.index.isin(_usable(b_).index)
+    both = ok_a & ok_b
     a, b_ = a[both], b_[both]
-    beta = a["beta_alt"].to_numpy(float)
+    beta_a, beta_b = a["beta_alt"].to_numpy(float), b_["beta_alt"].to_numpy(float)
     da, db = a["predicted"].to_numpy(float), b_["predicted"].to_numpy(float)
     clusters = a[cluster].astype(str).to_numpy() if cluster else np.arange(len(a))
     n_clusters = len(np.unique(clusters))
     labels, codes = _codes(a[group]) if group else (np.empty(0), None)
 
-    def diff(f: Metric, idx: np.ndarray | slice) -> tuple[float, float]:
-        sub = None if codes is None else codes[idx]
-        ea = _estimate(f, da[idx], beta[idx], sub, labels.size, min_group)[0]
-        eb = _estimate(f, db[idx], beta[idx], sub, labels.size, min_group)[0]
-        return ea, eb
+    fixed: dict[tuple[str, str], np.ndarray | None] = {}
 
-    run_boot = bool(len(beta) and n_boot and n_clusters >= min_clusters)
+    def diff(m: str, f: Metric, idx: np.ndarray | slice) -> tuple[float, float]:
+        sub = None if codes is None else codes[idx]
+        out = []
+        for side, pred, beta in (("a", da, beta_a), ("b", db, beta_b)):
+            e, values, sizes = _estimate(
+                f, pred[idx], beta[idx], sub, labels.size, min_group, fixed.get((m, side))
+            )
+            if (m, side) not in fixed:
+                fixed[(m, side)] = (
+                    None if codes is None else (sizes >= min_group) & np.isfinite(values)
+                )
+            out.append(e)
+        return out[0], out[1]
+
+    originals = {m: diff(m, f, slice(None)) for m, f in METRICS.items()}
+
+    run_boot = bool(len(beta_a) and n_boot and n_clusters >= min_clusters)
     reps = {m: np.full(n_boot if run_boot else 0, np.nan) for m in METRICS}
     if run_boot:
         sampler = _ClusterSampler(clusters, np.random.default_rng(seed))
         for i in range(n_boot):
             idx = sampler.draw()
             for m, f in METRICS.items():
-                ea, eb = diff(f, idx)
+                ea, eb = diff(m, f, idx)
                 reps[m][i] = ea - eb
     rows = []
-    for m, f in METRICS.items():
-        ea, eb = diff(f, slice(None))
+    for m, (ea, eb) in originals.items():
         lo, hi, n_finite = _interval(reps[m])
         rows.append(
             {
@@ -510,7 +544,9 @@ def compare(
                 "difference": ea - eb,
                 "ci95_low": lo,
                 "ci95_high": hi,
-                "n_pairs": len(beta),
+                "n_pairs": len(beta_a),
+                "n_usable_a_only": int((ok_a & ~ok_b).sum()),
+                "n_usable_b_only": int((ok_b & ~ok_a).sum()),
                 "n_clusters": n_clusters,
                 "n_boot_finite": n_finite,
                 "weighting": f"by {group}" if group else "pooled",

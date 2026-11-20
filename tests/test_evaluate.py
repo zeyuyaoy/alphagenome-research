@@ -417,3 +417,37 @@ def test_mitochondrial_names_match_across_conventions():
     p = preds([("chrMT", 10, "A", "G", "G1", 0.5, "completed")])
     o = obs([("M", 10, "A", "G", "G1", 0.2, "G")])
     assert ag2kit.join(p, o)["pair_status"].tolist() == ["ok"]
+
+
+def test_compare_scores_each_ledger_against_its_own_orientation():
+    p, o = synthetic(n_genes=30)
+    flipped = p.assign(ref=p["alt"], alt=p["ref"], raw_effect=-p["raw_effect"])
+    a = ag2kit.join(p, o, forward_strand=False)
+    b = ag2kit.join(flipped, o, forward_strand=False)
+    table = ag2kit.compare(a, b, n_boot=50).set_index("metric")
+    assert np.allclose(table["difference"], 0)
+    assert (table["estimate_a"] == table["estimate_b"]).all()
+
+
+def test_compare_reports_pairs_usable_in_only_one_ledger():
+    p, o = synthetic()
+    worse = p.copy()
+    worse.loc[:2, "status"] = "failed"
+    table = ag2kit.compare(ag2kit.join(p, o), ag2kit.join(worse, o), n_boot=0)
+    assert table["n_usable_a_only"].unique().tolist() == [3]
+    assert table["n_usable_b_only"].unique().tolist() == [0]
+
+
+def test_group_intervals_need_enough_clusters():
+    p, o = synthetic(n_genes=40, per_gene=6)
+    o["tissue"] = np.where(o["gene_id"].isin(["G0", "G1"]), "rare", "common")
+    table = ag2kit.evaluate(p, o, group="tissue", n_boot=100).per_group.set_index("group")
+    assert table.loc["rare", "n_clusters"].min() == 2
+    assert table.loc["rare", "ci95_low"].isna().all()
+    assert table.loc["common", "ci95_low"].notna().all()
+
+
+def test_default_interval_needs_twenty_clusters():
+    p, o = synthetic(n_genes=10)
+    assert ag2kit.evaluate(p, o, n_boot=50).metrics["ci95_low"].isna().all()
+    assert ag2kit.evaluate(p, o, n_boot=50, min_clusters=5).metrics["ci95_low"].notna().all()

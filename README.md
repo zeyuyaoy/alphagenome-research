@@ -9,9 +9,9 @@ The package covers four tasks:
 | Capability       | Description                                                                                                                                                                                                                                                        |
 |------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Variant input    | `read_variants` loads VCF/BCF (via `pysam`), delimited text, Parquet, and DataFrames into a common GRCh38 schema. It splits multiallelic records, assigns an `input_status` to every row, and optionally checks REF alleles against an indexed FASTA.              |
-| Scoring          | `AG2Client.score_variants` caches complete SDK results for each unique request. Scoring one variant against multiple genes uses one API call. Runs can resume after interruption, and failed requests receive error records. Output rows retain their input order. |
+| Scoring          | `AG2Client.score_variants` caches complete SDK results for each unique request. Scoring one variant against multiple genes uses one API call. Memory stays bounded for large batches, runs resume after interruption, and failed requests receive error records. Output rows retain their input order. |
 | Observed effects | `ag2kit.gtex` retrieves significant single-tissue eQTLs from GTEx Portal API v2 (GTEx v8, v10, and v11) or reads downloaded significant-pairs files [2].                                                                                                           |
-| Evaluation       | `evaluate` orients observed effects to the predicted ALT allele and records a `pair_status` for every pair. It reports sign AUROC, signed Spearman correlation, and sign accuracy, with gene-cluster bootstrap intervals and optional tissue weighting.            |
+| Evaluation       | `evaluate` orients observed effects to the predicted ALT allele and records a `pair_status` for every pair. It reports sign AUROC, signed Spearman correlation, and sign accuracy, with gene-cluster bootstrap intervals, stratified results, and paired comparisons between prediction sets. |
 
 > [!NOTE]
 > Use the official SDK for single predictions, track plots, in-silico mutagenesis, and gene annotation (`alphagenome.data.gene_annotation`). Use separate tools for liftover and summary-statistic quality control. For indel normalisation, use `bcftools norm` [3].
@@ -122,7 +122,35 @@ print(result.metrics[["metric", "estimate", "ci95_low", "ci95_high", "n_clusters
 print(result.pairs[["pos", "beta", "beta_alt", "allele_flipped", "pair_status"]])
 ```
 
-Confidence intervals are `NaN` when fewer than five gene clusters are available.
+Confidence intervals are `NaN` with fewer than 20 clusters (`min_clusters`), because percentile intervals from few clusters are too narrow. Here there are only two genes.
+
+#### Stratified and paired evaluation
+
+`evaluate` is `join` followed by `evaluate_pairs`. Calling them separately lets you add columns to the pair ledger and stratify by them. `compare` estimates the difference between two prediction sets on the same observations, using the same cluster resamples for both:
+
+```python
+import numpy as np
+import pandas as pd
+
+import ag2kit
+
+rng = np.random.default_rng(0)
+genes = np.repeat([f"G{i}" for i in range(40)], 5)
+beta = np.repeat(rng.normal(size=40), 5) + rng.normal(scale=0.5, size=200)
+keys = pd.DataFrame({"chrom": "chr1", "pos": np.arange(1, 201), "ref": "A", "alt": "G", "gene_id": genes})
+obs = keys.assign(beta=beta, effect_allele="G")
+good = keys.assign(raw_effect=beta + rng.normal(size=200), status="completed")
+noisy = keys.assign(raw_effect=beta + rng.normal(scale=3, size=200), status="completed")
+
+pairs = ag2kit.join(good, obs)
+pairs["magnitude"] = pd.qcut(pairs["predicted"].abs(), 2, labels=["small", "large"])
+by_size = ag2kit.evaluate_pairs(pairs, group="magnitude", n_boot=200)
+print(by_size.per_group[["metric", "group", "n", "value", "ci95_low", "ci95_high"]])
+
+print(ag2kit.compare(pairs, ag2kit.join(noisy, obs), n_boot=200))
+```
+
+Comparing two scorers, track filters, or conditions this way accounts for the dependence between their predictions, which the McNemar test in `ag2kit.stats` does not. To check performance on regions held out from training, score with `AG2Client(model_version="FOLD_1")`, add `ag2kit.annotate_folds(pairs)` labels, and evaluate with `group="fold_subset"`. See [Methods](docs/methods.md#held-out-regions) for the caveats.
 
 #### Conditioning
 
@@ -131,12 +159,13 @@ Each AlphaGenome 2 request uses one conditioning input. You can choose one of tw
 1. **Reference condition:** Set `condition` to an ontology CURIE such as `UBERON:0013756`, or a composite such as `UBERON:0000178_CL:0001054`. Use a scorer such as `RNA_SEQ`.
 2. **Single-cell data:** Set `conditioning` to an `AnnData` object containing raw UMI counts. Use Ensembl IDs for `var_names` and include up to 256 cells. Set `condition_label` and use `SC_GENE_EXPRESSION_DENOISED`.
 
-To find valid reference conditions, call `supported_conditions()`. For finer control, build `RequestSpec` objects and use `score` or `score_many`. You can then inspect cached SDK tracks through `AG2Client.raw_scores`.
+To find valid reference conditions, call `client.connect()` and then the SDK method `client.model.supported_conditions()`. For finer control, build `RequestSpec` objects and use `score` or `score_many`. You can then inspect cached SDK tracks through `AG2Client.raw_scores`.
 
 #### Interpretation and limitations
 
 - `RNA_SEQ` predicts log fold changes, while GTEx reports slopes for normalised expression. Accordingly, `ag2kit` compares the direction and rank of effects.
-- GTEx significant-pairs files contain selected eQTL associations, and many variants linked to the same gene are in linkage disequilibrium. As a result, sign metrics may be higher than those measured across all tested pairs. By default, bootstrap intervals resample whole genes to account for within-gene dependence.
+- GTEx significant-pairs files contain selected eQTL associations, and many variants linked to the same gene are in linkage disequilibrium. As a result, sign metrics may be higher than those measured across all tested pairs. By default, bootstrap intervals resample whole genes to account for within-gene dependence; use locus clusters (`cluster_loci`) when variants are shared across genes.
+- Bootstrap intervals describe sampling uncertainty over the evaluated loci. They do not include model-output variability, such as differences between checkpoints, track sets, or conditioning draws.
 - Sign agreement describes performance at the tested loci. It does not establish causality or resolve individual variant effects. In addition, the p-values from `concordance`, `spearman`, and `mcnemar` assume independent pairs, so `evaluate` leaves them out.
 - All coordinates are GRCh38 and 1-based. The package performs no liftover. The API does not expose a model revision, so reproducible reruns depend on cached results ([Reproducibility](docs/api.md#reproducibility)). Tests cover the implementation, but the package has not reproduced a published AlphaGenome benchmark. See [Implementation validation](docs/methods.md#implementation-validation) and [Scope and limitations](docs/methods.md#scope-and-limitations).
 - Finally, AlphaGenome outputs are subject to the SDK's usage restrictions: non-commercial research only, with no use for training other machine-learning models or making clinical decisions. The AlphaGenome terms also govern cached and shared outputs. When using GTEx data, acknowledge the GTEx Project [2].
