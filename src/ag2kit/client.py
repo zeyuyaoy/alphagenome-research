@@ -317,7 +317,6 @@ class AG2Client:
         self._custom_model = self.model is not None
         self._connect_lock = threading.Lock()
         self._scorers: dict[tuple[str, bool], tuple[str, str]] = {}
-        self._stop = threading.Event()
 
     def connect(self) -> None:
         """Initializes the live client if needed.
@@ -571,7 +570,7 @@ class AG2Client:
         ceiling = min(MAX_BACKOFF, self.backoff * 2 ** (attempt - 1))
         return ceiling / 2 + random.uniform(0, ceiling / 2)
 
-    def _obtain(self, req: _Request) -> _Outcome:
+    def _obtain(self, req: _Request, stop: threading.Event | None = None) -> _Outcome:
         if req.problem:
             return _Outcome(None, "failed", req.problem, "validation")
         if self.dry_run:
@@ -609,7 +608,7 @@ class AG2Client:
                     delay,
                     attempt,
                 )
-                if self._stop.wait(delay):
+                if (stop or threading.Event()).wait(delay):
                     break
                 continue
             meta = {
@@ -769,12 +768,19 @@ class AG2Client:
             else:
                 shared.setdefault(req.key, []).append(i)
 
+        stop = threading.Event()
+
         def work(members: list[int]) -> list[tuple[int, _T]]:
-            out = self._obtain(reqs[members[0]])
-            return [(i, finish(reqs[i], out)) for i in members]
+            if stop.is_set():
+                return []
+            try:
+                out = self._obtain(reqs[members[0]], stop)
+                return [(i, finish(reqs[i], out)) for i in members]
+            except BaseException:
+                stop.set()
+                raise
 
         pool = ThreadPoolExecutor(max_workers=max_workers)
-        self._stop.clear()
         try:
             futures = [pool.submit(work, members) for members in shared.values()]
             for n, future in enumerate(as_completed(futures), start=1):
@@ -783,7 +789,7 @@ class AG2Client:
                 if n % PROGRESS_EVERY == 0 or n == len(futures):
                     log.info("finished %d of %d requests", n, len(futures))
         except BaseException:
-            self._stop.set()
+            stop.set()
             raise
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
