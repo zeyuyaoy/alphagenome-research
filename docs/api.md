@@ -177,7 +177,7 @@ Use `match` to require agreement on additional columns. For example, `match={"on
 
 The `metrics` table includes `estimate`, `ci95_low`, `ci95_high`, `n_pairs`, `n_pairs_used`, `n_clusters`, `n_boot_finite`, and `weighting`. `evaluation.json` includes the settings, software versions, and write timestamp.
 
-All metrics and groups use the same bootstrap resamples, so intervals do not depend on metric order. Intervals need at least `min_clusters` clusters overall, and per-group intervals need that many clusters within the group. The groups that contribute to a weighted estimate are fixed by the original sample; a resample in which one of them is undefined gives no replicate.
+All metrics and groups use the same bootstrap resamples, so intervals do not depend on metric order. Intervals need at least `min_clusters` clusters overall, and per-group intervals need that many clusters within the group. Only groups that contribute in the original sample can contribute to a weighted bootstrap estimate. In each resample, groups below `min_group` or with undefined metrics are omitted and the remaining group weights are renormalized; the replicate is discarded if no eligible groups remain.
 
 The ledger also carries the prediction's `pred_model_version`, `pred_track_filter`, and `pred_n_reduced_values` when present, so stratified and fold analyses can check what was scored.
 
