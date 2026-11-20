@@ -516,21 +516,28 @@ def compare(
     n_clusters = len(np.unique(clusters))
     labels, codes = _codes(a[group]) if group else (np.empty(0), None)
 
-    fixed: dict[tuple[str, str], np.ndarray | None] = {}
+    fixed: dict[str, np.ndarray] = {}
 
     def diff(m: str, f: Metric, idx: np.ndarray | slice) -> tuple[float, float]:
         sub = None if codes is None else codes[idx]
-        out = []
-        for side, pred, beta in (("a", da, beta_a), ("b", db, beta_b)):
-            e, values, sizes = _estimate(
-                f, pred[idx], beta[idx], sub, labels.size, min_group, fixed.get((m, side))
-            )
-            if (m, side) not in fixed:
-                fixed[(m, side)] = (
-                    None if codes is None else (sizes >= min_group) & np.isfinite(values)
-                )
-            out.append(e)
-        return out[0], out[1]
+        ea, values_a, sizes = _estimate(
+            f, da[idx], beta_a[idx], sub, labels.size, min_group
+        )
+        eb, values_b, _ = _estimate(
+            f, db[idx], beta_b[idx], sub, labels.size, min_group
+        )
+        if codes is None:
+            return ea, eb
+        use = (sizes >= min_group) & np.isfinite(values_a) & np.isfinite(values_b)
+        if m not in fixed:
+            fixed[m] = use.copy()
+        use &= fixed[m]
+        if not use.any():
+            return np.nan, np.nan
+        return (
+            float(np.average(values_a[use], weights=sizes[use])),
+            float(np.average(values_b[use], weights=sizes[use])),
+        )
 
     originals = {m: diff(m, f, slice(None)) for m, f in METRICS.items()}
 
