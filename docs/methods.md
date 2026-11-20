@@ -103,7 +103,7 @@ The offline test suite (`uv run pytest`) checks numerical metrics against hand c
 
 A pinned GTEx v10 Portal response tests real-data parsing. Real-data fixtures do not cover the GTEx v8 and v11 paths or the v8 text reader. One optional live test (`uv run pytest -m live`) makes an API request using `ALPHA_GENOME_API_KEY`.
 
-Simulations in `benchmarks/coverage_sim.py` check the coverage of cluster and pair bootstrap intervals on clustered data with a known population AUROC.
+Simulations in `benchmarks/coverage_sim.py` check the coverage of cluster and pair bootstrap intervals on clustered data with a known population AUROC. With 60 genes of 6 pairs each (true sign AUROC 0.719, 200 replicates), 95% intervals covered the truth in 93.0% of replicates (SE 1.8%) when resampling genes and 65.5% (SE 3.4%) when resampling pairs.
 
 These tests assess software behavior. They do not establish biological validity. No published AlphaGenome or Borzoi eQTL result has been reproduced, for these reasons:
 

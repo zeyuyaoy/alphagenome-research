@@ -137,7 +137,9 @@ import ag2kit
 rng = np.random.default_rng(0)
 genes = np.repeat([f"G{i}" for i in range(40)], 5)
 beta = np.repeat(rng.normal(size=40), 5) + rng.normal(scale=0.5, size=200)
-keys = pd.DataFrame({"chrom": "chr1", "pos": np.arange(1, 201), "ref": "A", "alt": "G", "gene_id": genes})
+keys = pd.DataFrame(
+    {"chrom": "chr1", "pos": np.arange(1, 201), "ref": "A", "alt": "G", "gene_id": genes}
+)
 obs = keys.assign(beta=beta, effect_allele="G")
 good = keys.assign(raw_effect=beta + rng.normal(size=200), status="completed")
 noisy = keys.assign(raw_effect=beta + rng.normal(scale=3, size=200), status="completed")
