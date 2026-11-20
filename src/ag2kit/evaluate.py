@@ -520,12 +520,8 @@ def compare(
 
     def diff(m: str, f: Metric, idx: np.ndarray | slice) -> tuple[float, float]:
         sub = None if codes is None else codes[idx]
-        ea, values_a, sizes = _estimate(
-            f, da[idx], beta_a[idx], sub, labels.size, min_group
-        )
-        eb, values_b, _ = _estimate(
-            f, db[idx], beta_b[idx], sub, labels.size, min_group
-        )
+        ea, values_a, sizes = _estimate(f, da[idx], beta_a[idx], sub, labels.size, min_group)
+        eb, values_b, _ = _estimate(f, db[idx], beta_b[idx], sub, labels.size, min_group)
         if codes is None:
             return ea, eb
         use = (sizes >= min_group) & np.isfinite(values_a) & np.isfinite(values_b)
