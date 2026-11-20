@@ -76,7 +76,7 @@ ignore = ["D105"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*.py" = ["D101", "D102", "D103", "D107"]
+"{tests,benchmarks}/*.py" = ["D101", "D102", "D103", "D107"]
 
 [tool.mypy]
 files = ["src/ag2kit"]
