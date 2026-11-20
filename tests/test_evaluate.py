@@ -451,3 +451,37 @@ def test_default_interval_needs_twenty_clusters():
     p, o = synthetic(n_genes=10)
     assert ag2kit.evaluate(p, o, n_boot=50).metrics["ci95_low"].isna().all()
     assert ag2kit.evaluate(p, o, n_boot=50, min_clusters=5).metrics["ci95_low"].notna().all()
+
+
+def test_compare_detects_rows_reordered_within_match_groups():
+    base = pd.DataFrame(
+        {
+            "chrom": "1",
+            "pos": 100,
+            "ref": "A",
+            "alt": "G",
+            "gene_id": "G1",
+            "beta": 1.0,
+            "effect_allele": "G",
+            "tissue": ["blood", "liver"],
+        }
+    )
+    obs_ = pd.concat(
+        [base.assign(gene_id=f"G{i}", pos=100 + i) for i in range(8)], ignore_index=True
+    )
+    pred = obs_[["chrom", "pos", "ref", "alt", "gene_id"]].assign(
+        condition=obs_["tissue"], status="completed", raw_effect=1.0
+    )
+    m = {"tissue": "condition"}
+    a = ag2kit.join(pred, obs_, match=m)
+    with pytest.raises(ValueError, match="same observed table"):
+        ag2kit.compare(a, ag2kit.join(pred, obs_.iloc[np.arange(16) ^ 1], match=m), n_boot=0)
+
+
+def test_one_small_group_does_not_void_grouped_intervals():
+    p, o = synthetic(n_genes=60, per_gene=5)
+    o["tissue"] = "common"
+    o.loc[o["gene_id"] == "G0", "tissue"] = "rare"
+    o.loc[o.index[o["gene_id"] == "G0"][2:], "tissue"] = "common"
+    m = ag2kit.evaluate(p, o, group="tissue", n_boot=200).metrics
+    assert (m["n_boot_finite"] > 190).all()

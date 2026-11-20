@@ -253,15 +253,19 @@ def _estimate(
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Returns the pooled or group-size-weighted estimate, group values, and group sizes.
 
-    With fixed, the average uses exactly those groups and is NaN if any is undefined.
+    With fixed, only those groups can contribute, so groups never join the
+    average in a resample; a fixed group that is undefined in a resample is
+    left out, as in by_group.
     """
     if codes is None:
         return float(metric(d, b)), np.empty(0), np.empty(0, dtype=int)
     sizes = np.bincount(codes, minlength=n_groups)
     members = np.split(np.argsort(codes, kind="stable"), np.cumsum(sizes)[:-1])
     values = np.array([float(metric(d[m], b[m])) if m.size else np.nan for m in members])
-    use = (sizes >= min_group) & np.isfinite(values) if fixed is None else fixed
-    if not use.any() or not np.isfinite(values[use]).all():
+    use = (sizes >= min_group) & np.isfinite(values)
+    if fixed is not None:
+        use &= fixed
+    if not use.any():
         return np.nan, values, sizes
     return float(np.average(values[use], weights=sizes[use])), values, sizes
 
@@ -462,7 +466,8 @@ def compare(
     """Estimates metric differences between two prediction sets on the same observations.
 
     Both ledgers must come from join with the same observed table, so row i
-    describes the same observed record in each. The comparison uses rows that
+    describes the same observed record in each. Every observed column is
+    checked for this, including match and group columns. The comparison uses rows that
     are usable in both ledgers, each oriented to its own predicted ALT, and a
     paired cluster bootstrap that applies
     each resample to both prediction sets. This accounts for the dependence
@@ -486,7 +491,12 @@ def compare(
     Raises:
         ValueError: If the ledgers are not row-aligned or lack required columns.
     """
-    keys = ["chrom", "pos", "ref", "alt", "gene_id", "beta", "effect_allele"]
+    derived = {"predicted", "beta_alt", "allele_flipped", "pair_status"}
+    keys = [
+        c
+        for c in pairs_a.columns
+        if c in pairs_b.columns and c not in derived and not str(c).startswith("pred_")
+    ]
     keys = list(dict.fromkeys([*keys, *(c for c in (group, cluster) if c)]))
     for name, ledger in (("pairs_a", pairs_a), ("pairs_b", pairs_b)):
         if missing := set(keys) - set(ledger.columns):

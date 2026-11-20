@@ -694,7 +694,7 @@ def test_retries_sleep_between_attempts(tmp_path, monkeypatch):
     slept = []
     model = FakeModel(fail=lambda kw: FakeRpcError("UNAVAILABLE"))
     client = live(tmp_path, model, backoff=1, max_retries=3)
-    monkeypatch.setattr(client._stop, "wait", lambda d: slept.append(d) or False)
+    monkeypatch.setattr(ag2.threading.Event, "wait", lambda self, d: slept.append(d) or False)
     rec = client.score(spec())
     assert rec["attempts"] == 3 and len(slept) == 2 and 1 <= slept[1] <= 2
 
@@ -734,7 +734,7 @@ def test_interrupt_cancels_pending_requests(tmp_path):
     model = FakeModel(fail=stop)
     with pytest.raises(KeyboardInterrupt):
         live(tmp_path, model).score_many([spec(pos=41422154 + i) for i in range(20)], max_workers=1)
-    assert len(model.calls) <= 2
+    assert len(model.calls) == 1
 
 
 def test_mitochondrial_names_are_normalised():
@@ -753,3 +753,21 @@ def test_interrupt_does_not_wait_out_retry_delays(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         client.score_many([spec(pos=41422154 + i) for i in range(4)], max_workers=2)
     assert time.perf_counter() - start < 5
+
+
+def test_an_interrupted_batch_does_not_disable_later_retries(tmp_path):
+    def stop(kw):
+        raise KeyboardInterrupt
+
+    client = live(tmp_path, FakeModel(fail=stop), backoff=0.01)
+    with pytest.raises(KeyboardInterrupt):
+        client.score_many([spec()], max_workers=1)
+    n = {"i": 0}
+
+    def quota_once(kw):
+        n["i"] += 1
+        return FakeRpcError("RESOURCE_EXHAUSTED") if n["i"] == 1 else None
+
+    client.model = FakeModel(fail=quota_once)
+    rec = client.score(spec(alt="G"))
+    assert rec["status"] == "completed" and rec["attempts"] == 2
