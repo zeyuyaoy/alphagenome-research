@@ -187,6 +187,13 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
+> [!WARNING]
+> On macOS, if the checkout is inside an iCloud-synced folder such as `~/Documents`, iCloud marks files in dot-folders as hidden, and Python skips hidden `.pth` files, so `import ag2kit` fails after `uv sync`. Keep the environment in a `.nosync` folder, which iCloud ignores, behind the usual `.venv` link:
+> 
+> ```bash
+> rm -rf .venv && mkdir .venv.nosync && ln -s .venv.nosync .venv && uv sync --extra model --extra vcf
+> ```
+
 By default, tests run offline using a pinned GTEx Portal response. To run the live test, set `ALPHA_GENOME_API_KEY` and execute `uv run pytest -m live`.
 
 #### Licence
