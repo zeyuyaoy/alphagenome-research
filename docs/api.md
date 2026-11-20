@@ -37,7 +37,7 @@ client = ag2kit.AG2Client(
     dry_run=True,
     cache_dir=...,
     model_version="ALL_FOLDS",
-    max_retries=2,
+    max_retries=4,
     backoff=30.0,
     cache_namespace="",
     model=None,
@@ -45,6 +45,8 @@ client = ag2kit.AG2Client(
 ```
 
 `AG2Client` manages scoring requests and their cache. By default, `dry_run=True` plans requests without calling the API.
+
+Batch methods fetch each distinct request once and reduce it to gene records as soon as it completes, so memory use depends on `max_workers`, not on the number of variants. An interrupt (Ctrl-C) cancels requests that have not started; completed requests stay cached, so rerunning resumes the batch. Retries apply to `quota`, `transient`, and `network` errors: attempt *k* waits a random delay between half and all of `backoff * 2**(k-1)` seconds, capped at 600 seconds. Progress is logged at `INFO` level on the `ag2kit` logger.
 
 | Method                                                                                                                                                                    | Description                                                                                                                                                              |
 |---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -121,9 +123,20 @@ Supported datasets are `gtex_v8` (GENCODE v26), `gtex_v10` (v39), and `gtex_v11`
 | `tissues`           | List tissue IDs, UBERON IDs, and eGene counts.                                                                                       |
 | `gencode_id`        | Resolve a gene to its release-specific GENCODE identifier.                                                                           |
 
+Portal failures raise `ag2kit.gtex.SourceError`, a subclass of both `AG2KitError` and `RuntimeError`.
+
 `eqtls` resolves gene symbols and unversioned Ensembl IDs to the selected GENCODE release. Versioned Ensembl IDs (containing `.`) must match that release. `tissues` and `gencode_id` also accept `refresh`. GTEx responses are cached at `$AG2KIT_CACHE/gtex`.
 
 #### Evaluation
+
+Evaluation has two steps, which `evaluate` combines:
+
+```python
+pairs = ag2kit.join(predictions, observed, *, match=None, effect="raw_effect", forward_strand=True)
+result = ag2kit.evaluate_pairs(pairs, *, group=None, cluster="gene_id", n_boot=1000, seed=0, min_group=2, min_clusters=20)
+```
+
+`join` returns the pair ledger. Add columns to it before calling `evaluate_pairs` to stratify by anything you can compute, such as effect-size bins, distance to the TSS, or `annotate_folds` labels.
 
 ```python
 ag2kit.evaluate(
@@ -138,7 +151,7 @@ ag2kit.evaluate(
     n_boot=1000,
     seed=0,
     min_group=2,
-    min_clusters=5,
+    min_clusters=20,
 ) -> Evaluation
 ```
 
@@ -157,14 +170,26 @@ Use `match` to require agreement on additional columns. For example, `match={"on
 |---------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `pairs`             | One row per observed record, including `predicted`, `beta_alt`, `allele_flipped`, `pair_status`, and matched prediction fields prefixed with `pred_`. |
 | `metrics`           | `sign_auroc`, `spearman_rho`, and `sign_accuracy`, with estimates and uncertainty fields.                                                             |
-| `per_group`         | Group-level results: `group`, `n`, `value`, `metric`.                                                                                                 |
+| `per_group`         | Group-level results: `group`, `n`, `value`, `metric`, `ci95_low`, `ci95_high`, `n_clusters`, `n_boot_finite`.                                         |
 | `settings`          | Evaluation configuration.                                                                                                                             |
 | `summary()`         | Print metrics and counts by `pair_status`.                                                                                                            |
 | `save(directory)`   | Save `pairs.parquet`, `metrics.tsv`, `per_group.tsv`, and `evaluation.json`.                                                                          |
 
 The `metrics` table includes `estimate`, `ci95_low`, `ci95_high`, `n_pairs`, `n_pairs_used`, `n_clusters`, `n_boot_finite`, and `weighting`. `evaluation.json` includes the settings, software versions, and write timestamp.
 
+All metrics and groups use the same bootstrap resamples, so intervals do not depend on metric order. Intervals need at least `min_clusters` clusters overall, and per-group intervals need that many clusters within the group. The groups that contribute to a weighted estimate are fixed by the original sample; a resample in which one of them is undefined gives no replicate.
+
+The ledger also carries the prediction's `pred_model_version`, `pred_track_filter`, and `pred_n_reduced_values` when present, so stratified and fold analyses can check what was scored.
+
 `pair_status` can be `ok`, `no_prediction`, `prediction_failed`, `ambiguous_prediction`, `ref_mismatch`, `missing_statistics`, `ref_equals_alt`, `not_snv`, `palindromic`, or `effect_allele_not_in_ref_alt`. The `not_snv` and `palindromic` statuses apply only when `forward_strand=False`.
+
+##### Comparing prediction sets
+
+```python
+ag2kit.compare(pairs_a, pairs_b, *, group=None, cluster="gene_id", n_boot=1000, seed=0, min_group=2, min_clusters=20) -> pandas.DataFrame
+```
+
+`compare` estimates `a − b` for each metric, using pairs that are usable in both ledgers and a paired cluster bootstrap. Both ledgers must come from `join` with the same observed table; misaligned ledgers raise `ValueError`. Each ledger is evaluated against its own ALT orientation. The result has `estimate_a`, `estimate_b`, `difference`, `ci95_low`, `ci95_high`, `n_pairs`, `n_usable_a_only`, `n_usable_b_only`, `n_clusters`, `n_boot_finite`, and `weighting`. Large `n_usable_*_only` counts mean the two prediction sets fail on different variants, so also report each set's own `evaluate_pairs` result. Use it to compare scorers, track filters, conditions, or model versions.
 
 #### Statistics and utilities
 
@@ -177,7 +202,9 @@ The `metrics` table includes `estimate`, `ci95_low`, `ci95_high`, `n_pairs`, `n_
 | `ag2kit.stats.mcnemar`                                                      | Exact McNemar test for discordant pairs.                                                                       |
 | `ag2kit.stats.monte_carlo_summary`                                          | Summary across conditioning draws.                                                                             |
 | `harmonize_effect(estimate, effect_allele, ref, alt, forward_strand=False)` | Orient an observed effect to ALT. The default is `False`; `evaluate` defaults to `True`.                       |
-| `cluster_loci(df, window=1_000_000)`                                        | Greedy clustering by distance and gene, with one lead row per locus. This is not LD-based clustering.          |
+| `cluster_loci(df, window=1_000_000, *, gene="gene", pval="pval")`           | Greedy clustering by distance and gene, with one lead row per locus. This is not LD-based clustering.          |
+| `locus_clusters(df, window=1_000_000, *, gene="gene_id")`                   | Connected components of rows linked by gene or proximity; use as the `cluster` column for genome-wide sets.    |
+| `annotate_folds(df, model_version="FOLD_1", regions_path=None)`             | Add `fold_subset` (`train`, `valid`, `test`, or `none`) from the checkpoint's training regions.                |
 | `AG2KitError`, `CredentialsError`, `ScoringError`                           | Exceptions. `ScoringError` provides `error_type` and `record`.                                                 |
 | `Concordance`                                                               | Return type of `concordance`.                                                                                  |
 | `ReferenceBase`                                                             | Cached GRCh38 reference-base lookup through Ensembl REST.                                                      |
@@ -204,6 +231,8 @@ The manifest records the Git state and versions of Python, `ag2kit`, `alphagenom
 Requests with the same identity reuse cached predictions. Each cache entry stores its `requested_utc` timestamp. See [Prediction requests and caching](methods.md#prediction-requests-and-caching).
 
 Cell-conditioned requests use separate, ordered lists of cell and gene names in the cache fingerprint. Entries created with the earlier fingerprint require rescoring.
+
+Cache files written since v0.2.0 carry Parquet page checksums, which are verified on read. A corrupted or mismatched entry is logged and treated as a miss. Variants on `MT` or `chrMT` are scored as `chrM` since v0.2.0, so their cache keys differ from v0.1.0.
 
 The AlphaGenome API does not expose a model revision or guarantee identical results across calls. Results may change after cache deletion or a server-side model update. For reproducible analyses:
 

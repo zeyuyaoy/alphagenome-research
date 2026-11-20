@@ -301,15 +301,17 @@ def annotate_folds(
         A copy of df with a fold_subset column.
 
     Raises:
-        ValueError: If model_version is ALL_FOLDS, which trains on every region.
-        KeyError: If the SDK does not know model_version.
+        ValueError: If model_version is not FOLD_1, the only AlphaGenome 2
+            checkpoint that holds out regions.
         ImportError: If the AlphaGenome SDK is unavailable.
     """
     from alphagenome.data import fold_intervals
     from alphagenome.models.v1 import dna_client
 
-    if model_version == "ALL_FOLDS":
-        raise ValueError("ALL_FOLDS trains on every region; use a FOLD_ checkpoint")
+    if model_version != "FOLD_1":
+        raise ValueError(
+            f"{model_version!r}: AlphaGenome 2 offers one cross-validation checkpoint, FOLD_1"
+        )
     version = dna_client.ModelVersion[model_version]
     organism = dna_client.Organism.HOMO_SAPIENS
     pos0 = df["pos"].to_numpy(dtype=np.int64) - 1
@@ -323,3 +325,46 @@ def annotate_folds(
     out = df.copy()
     out["fold_subset"] = label
     return out
+
+
+def locus_clusters(
+    df: pd.DataFrame, window: int = 1_000_000, *, gene: str = "gene_id"
+) -> pd.Series:
+    """Groups rows into loci for use as bootstrap clusters.
+
+    Rows are linked when they share a gene or lie on the same chromosome
+    within window base pairs of each other, and loci are the connected
+    components of these links. Unlike cluster_loci, every row of a gene and
+    every chain of nearby variants falls in one locus, so dependence through
+    shared genes, shared variants, and nearby LD stays within a cluster.
+
+    Args:
+        df: Table with chrom, pos, and gene columns.
+        window: Maximum gap in base pairs between linked neighbouring rows.
+        gene: Gene column.
+
+    Returns:
+        Integer locus labels aligned to df's index.
+
+    Raises:
+        ValueError: If a required column is missing.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    missing = {"chrom", "pos", gene} - set(df.columns)
+    if missing:
+        raise ValueError(f"locus_clusters requires columns {sorted(missing)}")
+    n = len(df)
+    chrom = df["chrom"].map(normalize_chrom).to_numpy(str)
+    pos = df["pos"].to_numpy(float)
+    order = np.lexsort((pos, chrom))
+    near = (chrom[order][1:] == chrom[order][:-1]) & (np.diff(pos[order]) <= window)
+    _, genes = np.unique(df[gene].astype(str).to_numpy(), return_inverse=True)
+    by_gene = np.argsort(genes, kind="stable")
+    same = genes[by_gene][1:] == genes[by_gene][:-1]
+    rows = np.concatenate([order[:-1][near], by_gene[:-1][same]])
+    cols = np.concatenate([order[1:][near], by_gene[1:][same]])
+    graph = coo_matrix((np.ones(rows.size), (rows, cols)), shape=(n, n))
+    labels = connected_components(graph, directed=False)[1] if n else np.empty(0, dtype=int)
+    return pd.Series(labels, index=df.index, name="locus")

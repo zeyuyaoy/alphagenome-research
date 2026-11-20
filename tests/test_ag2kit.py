@@ -367,5 +367,59 @@ def test_annotate_folds_labels_by_containing_split(tmp_path):
         "test",
         "none",
     ]
-    with pytest.raises(ValueError, match="ALL_FOLDS"):
+    with pytest.raises(ValueError, match="FOLD_1"):
         ag2kit.annotate_folds(df, "ALL_FOLDS", str(bed))
+
+
+def test_locus_clusters_are_connected_components():
+    df = pd.DataFrame(
+        {
+            "chrom": ["1", "chr1", "1", "1", "2", "chr2", "1"],
+            "pos": [100, 900, 1700, 50_000, 100, 100, 90_000],
+            "gene_id": ["A", "B", "C", "D", "E", "F", "A"],
+        },
+        index=[10, 11, 12, 13, 14, 15, 16],
+    )
+    labels = va.locus_clusters(df, window=1000)
+    assert labels.index.tolist() == df.index.tolist()
+    groups = labels.groupby(labels).groups
+    sets = sorted(sorted(v) for v in groups.values())
+    assert sets == [[10, 11, 12, 16], [13], [14, 15]]
+
+
+@settings(max_examples=40, deadline=None)
+@given(
+    st.lists(
+        st.tuples(st.sampled_from(["1", "2"]), st.integers(1, 3000), st.sampled_from("ABCDE")),
+        max_size=30,
+    )
+)
+def test_locus_clusters_match_a_brute_force_union_find(rows):
+    df = pd.DataFrame(rows, columns=["chrom", "pos", "gene_id"])
+    parent = list(range(len(df)))
+
+    def find(i):
+        while parent[i] != i:
+            i = parent[i]
+        return i
+
+    for i in range(len(df)):
+        for j in range(i):
+            a, b = df.iloc[i], df.iloc[j]
+            linked = a.gene_id == b.gene_id
+            # Single linkage: any chain of gaps within the window links rows.
+            if linked:
+                parent[find(i)] = find(j)
+    # Distance links: consecutive sorted positions per chromosome.
+    for _, g in df.sort_values(["chrom", "pos"]).groupby("chrom"):
+        idx, pos = g.index.to_list(), g["pos"].to_list()
+        for k in range(1, len(idx)):
+            if pos[k] - pos[k - 1] <= 200:
+                parent[find(idx[k])] = find(idx[k - 1])
+    expected = [find(i) for i in range(len(df))]
+    got = va.locus_clusters(df, window=200).to_list()
+    same_expected = {
+        (i, j) for i in range(len(df)) for j in range(len(df)) if expected[i] == expected[j]
+    }
+    same_got = {(i, j) for i in range(len(df)) for j in range(len(df)) if got[i] == got[j]}
+    assert same_got == same_expected

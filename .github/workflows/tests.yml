@@ -25,6 +25,25 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest --cov --cov-report=term-missing
 
+  minimum-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Test against the lowest declared dependency versions
+        run: |
+          uv venv /tmp/min-env --python 3.11
+          uv pip install --python /tmp/min-env/bin/python --resolution lowest-direct ".[model,vcf]" "pytest>=8" "hypothesis>=6.100" "anndata>=0.10"
+          /tmp/min-env/bin/python -m pytest -p no:cacheprovider
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked --extra model
+      - run: uv run python benchmarks/bench.py --quick
+
   package:
     runs-on: ubuntu-latest
     steps:
